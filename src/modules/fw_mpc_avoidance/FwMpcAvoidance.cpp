@@ -283,14 +283,20 @@ void FwMpcAvoidance::Run()
 			const float V_cruise = math::max(vel_N.norm(), 8.f);
 
 			if (_controller.step(x_now, goal_up, V_cruise, false, u_cmd, x_pred)) {
-				const float phi_cmd = x_pred(6);
-				const float theta_cmd = x_pred(7);
-				const float throttle_norm = math::constrain(u_cmd(3) / _controller.limits().u_max(3), 0.f, 1.f);
+				const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+				const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
+				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
+				const float phi_cmd = math::constrain(x_pred(6), -roll_lim_rad, roll_lim_rad);
+				const float theta_cmd = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
+				float throttle_norm = u_cmd(3) / math::max(_controller.limits().u_max(3), 0.1f);
+				throttle_norm = PX4_ISFINITE(throttle_norm) ? math::constrain(throttle_norm, 0.f, 1.f) : 0.f;
+				float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd);
+				lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
 
 				lat_sp.timestamp = now;
 				lat_sp.course = NAN;
 				lat_sp.airspeed_direction = NAN;
-				lat_sp.lateral_acceleration = CONSTANTS_ONE_G * tanf(phi_cmd);
+				lat_sp.lateral_acceleration = lateral_accel_cmd;
 
 				lon_sp.timestamp = now;
 				lon_sp.altitude = NAN;
