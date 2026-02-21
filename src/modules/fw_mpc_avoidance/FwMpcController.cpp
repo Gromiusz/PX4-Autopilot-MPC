@@ -509,6 +509,8 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 
 bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints)
 {
+	_last_qp_debug = {};
+
 	// Symmetrize H
 	for (int i = 0; i < n_vars; i++) {
 		for (int j = i + 1; j < n_vars; j++) {
@@ -553,6 +555,7 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 		OSQPCscMatrix_free(P);
 		OSQPSettings_free(settings);
 		_last_qp_status = -1;
+		_last_qp_debug.solve_success = false;
 		z.setZero();
 		return false;
 	}
@@ -577,6 +580,9 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 
 	if (solver && solver->info) {
 		_last_qp_status = solver->info->status_val;
+		_last_qp_debug.objective_value = static_cast<float>(solver->info->obj_val);
+		_last_qp_debug.iterations = solver->info->iter;
+		_last_qp_debug.solve_time_us = static_cast<float>(solver->info->solve_time * 1e6);
 
 		ok = (solver->info->status_val == OSQP_SOLVED)
 		     || (solver->info->status_val == OSQP_SOLVED_INACCURATE);
@@ -584,6 +590,8 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 	} else {
 		_last_qp_status = exitflag;
 	}
+
+	_last_qp_debug.solve_success = ok;
 
 	if (ok && solver && solver->solution && solver->solution->x) {
 		for (int i = 0; i < n_vars; i++) {

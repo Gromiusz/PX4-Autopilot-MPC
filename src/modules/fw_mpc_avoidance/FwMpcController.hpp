@@ -59,6 +59,13 @@ public:
 		float margin{0.f};
 	};
 
+	struct QpDebug {
+		bool solve_success{false};
+		float objective_value{0.f};
+		int iterations{0};
+		float solve_time_us{0.f};
+	};
+
 	FwMpcController() = default;
 
 	bool configure(float Ts, int horizon);
@@ -82,6 +89,7 @@ public:
 		  ControlVec &u_apply, StateVec &x_next);
 
 	int last_qp_status() const { return _last_qp_status; }
+	const QpDebug &last_qp_debug() const { return _last_qp_debug; }
 
 	Weights &weights() { return _weights; }
 	Limits &limits() { return _limits; }
@@ -153,4 +161,5 @@ private:
 	matrix::Vector<float, kMaxConstraints> _l{};
 	matrix::Vector<float, kMaxConstraints> _u{};
 	int _last_qp_status{0};
+	QpDebug _last_qp_debug{};
 };

@@ -83,8 +83,12 @@ void FwMpcAvoidance::step_internal_model(const float dt)
 	_dynamics.propagate(Vector3f{}, Vector3f{}, wind_B, dt);
 }
 
-bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned) const
+bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
+		float &nearest_distance, float &trigger_distance) const
 {
+	nearest_distance = NAN;
+	trigger_distance = NAN;
+
 	const hrt_abstime obstacle_timeout_us =
 		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
 
@@ -97,11 +101,13 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	const float dmin = math::max(_param_fw_mpc_obs_dmin.get(), 1.f);
 	const float lookahead_s = math::max(_param_fw_mpc_obs_lkhd.get(), 0.f);
 	const float bias = math::max(_param_fw_mpc_obs_bias.get(), 0.f);
-	const float trigger_distance = math::max(dmin, speed * lookahead_s + bias);
+	trigger_distance = math::max(dmin, speed * lookahead_s + bias);
+	nearest_distance = INFINITY;
 
 	for (int i = 0; i < _obstacle_count; i++) {
 		const FwMpcController::Obstacle &obs = _obstacles[i];
 		const float distance_to_surface = (obs.c - pos_up).norm() - (obs.R + obs.margin);
+		nearest_distance = math::min(nearest_distance, distance_to_surface);
 
 		if (distance_to_surface < trigger_distance) {
 			return true;
@@ -109,6 +115,29 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	}
 
 	return false;
+}
+
+void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh,
+					bool obstacle_triggered, float nearest_distance, float trigger_distance,
+					float vehicle_speed, int qp_status, bool solve_success, float objective_value,
+					int qp_iterations, float qp_solve_time_us)
+{
+	mpc_status_s status{};
+	status.timestamp = hrt_absolute_time();
+	status.mpc_allowed = mpc_allowed;
+	status.mpc_active = mpc_active;
+	status.obstacle_data_fresh = obstacle_data_fresh;
+	status.obstacle_triggered = obstacle_triggered;
+	status.obstacle_count = math::max(_obstacle_count, 0);
+	status.nearest_obstacle_distance = nearest_distance;
+	status.trigger_distance = trigger_distance;
+	status.vehicle_speed = vehicle_speed;
+	status.solve_success = solve_success;
+	status.objective_value = objective_value;
+	status.qp_iterations = qp_iterations;
+	status.qp_solve_time_us = qp_solve_time_us;
+	status.last_qp_status = qp_status;
+	_mpc_status_pub.publish(status);
 }
 
 bool FwMpcAvoidance::should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const
@@ -189,11 +218,18 @@ void FwMpcAvoidance::Run()
 	bool have_lat = false;
 	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
+	float nearest_obstacle_distance = NAN;
+	float trigger_distance = NAN;
+	float vehicle_speed = NAN;
+	bool obstacle_triggered = false;
 	vehicle_status_s status{};
 	vehicle_control_mode_s control_mode{};
 	const bool have_status = _status_sub.copy(&status);
 	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
 	const bool mpc_allowed = have_status && have_control_mode && should_allow_mpc(status, control_mode);
+	const hrt_abstime obstacle_timeout_us =
+		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
+	const bool obstacle_data_fresh = (_obstacle_count > 0) && (hrt_elapsed_time(&_time_obstacle_last_update) <= obstacle_timeout_us);
 
 	bool mpc_active_now = false;
 
@@ -204,7 +240,10 @@ void FwMpcAvoidance::Run()
 
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
-		const bool should_activate_now = have_state && have_goal && should_activate_mpc(lpos, vel_N);
+		vehicle_speed = vel_N.norm();
+		const bool should_activate_now = have_state && have_goal
+						&& should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance);
+		obstacle_triggered = should_activate_now;
 		mpc_active_now = should_activate_now;
 
 		if (should_activate_now && !_mpc_active_last) {
@@ -270,6 +309,10 @@ void FwMpcAvoidance::Run()
 	}
 
 	_mpc_active_last = mpc_active_now;
+	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
+	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, nearest_obstacle_distance,
+			   trigger_distance, vehicle_speed, _controller.last_qp_status(), qp_debug.solve_success,
+			   qp_debug.objective_value, qp_debug.iterations, qp_debug.solve_time_us);
 
 	if (have_lat) {
 		_lat_sp_pub.publish(lat_sp);

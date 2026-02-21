@@ -141,6 +141,7 @@ set(msg_files
 	MessageFormatResponse.msg
 	Mission.msg
 	MissionResult.msg
+	MpcStatus.msg
 	MountOrientation.msg
 	NavigatorMissionItem.msg
 	NavigatorStatus.msg

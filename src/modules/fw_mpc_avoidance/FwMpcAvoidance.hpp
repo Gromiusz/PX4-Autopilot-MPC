@@ -12,6 +12,7 @@
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fw_mpc_obstacles.h>
+#include <uORB/topics/mpc_status.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
@@ -42,7 +43,11 @@ private:
 	void parameters_update();
 	void step_internal_model(float dt);
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
-	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned) const;
+	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
+				 float &nearest_distance, float &trigger_distance) const;
+	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
+			       float nearest_distance, float trigger_distance, float vehicle_speed, int qp_status,
+			       bool solve_success, float objective_value, int qp_iterations, float qp_solve_time_us);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
@@ -57,6 +62,7 @@ private:
 
 	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(mpc_lateral_setpoint)};
 	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(mpc_longitudinal_setpoint)};
+	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
 	FwMpcDynamics _dynamics{};
