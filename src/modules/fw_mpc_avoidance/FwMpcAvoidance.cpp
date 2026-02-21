@@ -198,6 +198,8 @@ void FwMpcAvoidance::Run()
 	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
 	const bool mpc_allowed = have_status && have_control_mode && should_allow_mpc(status, control_mode);
 
+	bool mpc_active_now = false;
+
 	if (_param_fw_mpc_avoid_en.get() && mpc_allowed) {
 		vehicle_attitude_s att{};
 		vehicle_angular_velocity_s rates{};
@@ -205,8 +207,15 @@ void FwMpcAvoidance::Run()
 
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
+		const bool should_activate_now = have_state && have_goal && should_activate_mpc(lpos, vel_N);
+		mpc_active_now = should_activate_now;
 
-		if (have_state && have_goal && should_activate_mpc(lpos, vel_N)) {
+		if (should_activate_now && !_mpc_active_last) {
+			// Reinitialize trim whenever MPC takes over again.
+			_mpc_ready = false;
+		}
+
+		if (should_activate_now) {
 			const matrix::Quatf q(att.q);
 			const matrix::Dcmf R_nb{q};
 			const matrix::Vector3f vel_B = R_nb.transpose() * vel_N;
@@ -262,6 +271,8 @@ void FwMpcAvoidance::Run()
 			step_internal_model(math::max(dt, _param_fw_mpc_avoid_dt.get()));
 		}
 	}
+
+	_mpc_active_last = mpc_active_now;
 
 	if (have_lat) {
 		_lat_sp_pub.publish(lat_sp);

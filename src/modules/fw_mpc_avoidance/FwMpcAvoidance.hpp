@@ -62,6 +62,7 @@ private:
 	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
 	bool _mpc_ready{false};
+	bool _mpc_active_last{false};
 	hrt_abstime _time_obstacle_last_update{0};
 	int _obstacle_count{0};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
