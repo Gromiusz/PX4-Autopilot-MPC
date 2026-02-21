@@ -15,6 +15,15 @@
 
 using matrix::Quatf;
 using matrix::Vector3f;
+using namespace time_literals;
+
+namespace
+{
+static constexpr hrt_abstime kObstacleMsgTimeout = 500_ms;
+static constexpr float kObstacleTriggerDistanceMin = 25.f;
+static constexpr float kObstacleLookaheadTime = 3.f;
+static constexpr float kObstacleTriggerBias = 5.f;
+}
 
 const matrix::Vector3f FwMpcDynamics::_I_diag{0.02f, 0.02f, 0.04f};
 const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I = matrix::diag(FwMpcDynamics::_I_diag);
@@ -83,6 +92,28 @@ void FwMpcAvoidance::step_internal_model(const float dt)
 	_dynamics.propagate(Vector3f{}, Vector3f{}, wind_B, dt);
 }
 
+bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned) const
+{
+	if (_obstacle_count <= 0 || hrt_elapsed_time(&_time_obstacle_last_update) > kObstacleMsgTimeout) {
+		return false;
+	}
+
+	const Vector3f pos_up{lpos.x, lpos.y, -lpos.z};
+	const float speed = vel_ned.norm();
+	const float trigger_distance = math::max(kObstacleTriggerDistanceMin, speed * kObstacleLookaheadTime + kObstacleTriggerBias);
+
+	for (int i = 0; i < _obstacle_count; i++) {
+		const FwMpcController::Obstacle &obs = _obstacles[i];
+		const float distance_to_surface = (obs.c - pos_up).norm() - (obs.R + obs.margin);
+
+		if (distance_to_surface < trigger_distance) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void FwMpcAvoidance::Run()
 {
 	if (should_exit()) {
@@ -98,6 +129,8 @@ void FwMpcAvoidance::Run()
 	if (_fw_mpc_obstacles_sub.update(&obstacles_msg)) {
 		if (obstacles_msg.count == 0) {
 			_controller.clear_obstacles();
+			_obstacle_count = 0;
+			_time_obstacle_last_update = hrt_absolute_time();
 
 		} else if (obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU
 			   || obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_NED) {
@@ -126,9 +159,16 @@ void FwMpcAvoidance::Run()
 				o.R = obstacles_msg.radius[i];
 				o.margin = obstacles_msg.margin[i];
 				obs.push_back(o);
+				_obstacles[i] = o;
 			}
 
 			_controller.set_obstacles(obs);
+			_obstacle_count = count;
+			_time_obstacle_last_update = hrt_absolute_time();
+
+		} else {
+			_controller.clear_obstacles();
+			_obstacle_count = 0;
 		}
 	}
 
@@ -140,8 +180,8 @@ void FwMpcAvoidance::Run()
 	fixed_wing_longitudinal_setpoint_s lon_sp{};
 	vehicle_local_position_setpoint_s lpos_sp{};
 
-	bool have_lat = _lat_sp_sub.copy(&lat_sp);
-	bool have_lon = _lon_sp_sub.copy(&lon_sp);
+	bool have_lat = false;
+	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
 
 	if (_param_fw_mpc_avoid_en.get()) {
@@ -150,11 +190,11 @@ void FwMpcAvoidance::Run()
 		vehicle_local_position_s lpos{};
 
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
+		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 
-		if (have_state && have_goal) {
+		if (have_state && have_goal && should_activate_mpc(lpos, vel_N)) {
 			const matrix::Quatf q(att.q);
 			const matrix::Dcmf R_nb{q};
-			const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 			const matrix::Vector3f vel_B = R_nb.transpose() * vel_N;
 			const matrix::Eulerf euler(q);
 
@@ -203,13 +243,12 @@ void FwMpcAvoidance::Run()
 				have_lon = true;
 			}
 
-		} else {
+		} else if (have_state) {
 			// Fallback: integrate internal model to keep nominal state bounded.
 			step_internal_model(math::max(dt, _param_fw_mpc_avoid_dt.get()));
 		}
 	}
 
-	// Passthrough (or future override) publisher.
 	if (have_lat) {
 		_lat_sp_pub.publish(lat_sp);
 	}

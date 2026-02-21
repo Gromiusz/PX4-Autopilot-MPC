@@ -207,10 +207,11 @@ void FwLateralLongitudinalControl::Run()
 				_time_mpc_longitudinal_setpoint_last_received = hrt_absolute_time();
 			}
 
-			const bool mpc_longitudinal_active = hrt_elapsed_time(&_time_mpc_longitudinal_setpoint_last_received) <
-						 MPC_SETPOINT_TIMEOUT;
+			const bool mpc_active =
+				hrt_elapsed_time(&_time_mpc_longitudinal_setpoint_last_received) < MPC_SETPOINT_TIMEOUT
+				&& hrt_elapsed_time(&_time_mpc_lateral_setpoint_last_received) < MPC_SETPOINT_TIMEOUT;
 
-			if (!mpc_longitudinal_active && _fw_longitudinal_ctrl_sub.updated()) {
+			if (!mpc_active && _fw_longitudinal_ctrl_sub.updated()) {
 				_fw_longitudinal_ctrl_sub.copy(&_long_control_sp);
 			}
 
@@ -244,9 +245,7 @@ void FwLateralLongitudinalControl::Run()
 				_time_mpc_lateral_setpoint_last_received = hrt_absolute_time();
 			}
 
-			const bool mpc_lateral_active = hrt_elapsed_time(&_time_mpc_lateral_setpoint_last_received) < MPC_SETPOINT_TIMEOUT;
-
-			if (!mpc_lateral_active && _fw_lateral_ctrl_sub.updated()) {
+			if (!mpc_active && _fw_lateral_ctrl_sub.updated()) {
 				// We store the update of _fw_lateral_ctrl_sub in a member variable instead of only local such that we can run
 				// the controllers also without new setpoints.
 				_fw_lateral_ctrl_sub.copy(&_lat_control_sp);

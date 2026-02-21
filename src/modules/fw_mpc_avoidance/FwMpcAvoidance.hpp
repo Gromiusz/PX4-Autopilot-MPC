@@ -40,6 +40,7 @@ private:
 	void Run() override;
 	void parameters_update();
 	void step_internal_model(float dt);
+	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned) const;
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
@@ -47,8 +48,6 @@ private:
 	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
-	uORB::Subscription _lat_sp_sub{ORB_ID(fixed_wing_lateral_setpoint)};
-	uORB::Subscription _lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
@@ -60,6 +59,9 @@ private:
 	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
 	bool _mpc_ready{false};
+	hrt_abstime _time_obstacle_last_update{0};
+	int _obstacle_count{0};
+	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
