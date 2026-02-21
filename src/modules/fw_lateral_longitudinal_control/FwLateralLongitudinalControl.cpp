@@ -63,6 +63,8 @@ static constexpr float ROLL_WARNING_CAN_RUN_THRESHOLD = 0.9f;
 
 // [m/s/s] slew rate limit for airspeed setpoint changes
 static constexpr float ASPD_SP_SLEW_RATE = 1.f;
+// [us] timeout after which MPC setpoints are considered stale
+static constexpr hrt_abstime MPC_SETPOINT_TIMEOUT = 300_ms;
 
 FwLateralLongitudinalControl::FwLateralLongitudinalControl(bool is_vtol) :
 	ModuleParams(nullptr),
@@ -200,7 +202,15 @@ void FwLateralLongitudinalControl::Run()
 			float pitch_sp{NAN};
 			float throttle_sp{NAN};
 
-			if (_fw_longitudinal_ctrl_sub.updated()) {
+			if (_mpc_longitudinal_ctrl_sub.updated()) {
+				_mpc_longitudinal_ctrl_sub.copy(&_long_control_sp);
+				_time_mpc_longitudinal_setpoint_last_received = hrt_absolute_time();
+			}
+
+			const bool mpc_longitudinal_active = hrt_elapsed_time(&_time_mpc_longitudinal_setpoint_last_received) <
+						 MPC_SETPOINT_TIMEOUT;
+
+			if (!mpc_longitudinal_active && _fw_longitudinal_ctrl_sub.updated()) {
 				_fw_longitudinal_ctrl_sub.copy(&_long_control_sp);
 			}
 
@@ -229,7 +239,14 @@ void FwLateralLongitudinalControl::Run()
 			// ----- Lateral ------
 			float roll_sp {NAN};
 
-			if (_fw_lateral_ctrl_sub.updated()) {
+			if (_mpc_lateral_ctrl_sub.updated()) {
+				_mpc_lateral_ctrl_sub.copy(&_lat_control_sp);
+				_time_mpc_lateral_setpoint_last_received = hrt_absolute_time();
+			}
+
+			const bool mpc_lateral_active = hrt_elapsed_time(&_time_mpc_lateral_setpoint_last_received) < MPC_SETPOINT_TIMEOUT;
+
+			if (!mpc_lateral_active && _fw_lateral_ctrl_sub.updated()) {
 				// We store the update of _fw_lateral_ctrl_sub in a member variable instead of only local such that we can run
 				// the controllers also without new setpoints.
 				_fw_lateral_ctrl_sub.copy(&_lat_control_sp);

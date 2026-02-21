@@ -12,3 +12,5 @@ float32 height_rate 			# [m/s] [ENU] Scalar height rate setpoint. NAN if not con
 float32 equivalent_airspeed 		# [m/s] [@range 0, inf] Scalar equivalent airspeed setpoint. NAN if system default should be used
 float32 pitch_direct 			# [rad] [@range -pi, pi] [FRD] NAN if not controlled, overrides total energy controller
 float32 throttle_direct 		# [norm] [@range 0,1] NAN if not controlled, overrides total energy controller
+
+# TOPICS fixed_wing_longitudinal_setpoint mpc_longitudinal_setpoint

@@ -53,8 +53,8 @@ private:
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
 
-	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(fixed_wing_lateral_setpoint)};
-	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(fixed_wing_longitudinal_setpoint)};
+	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(mpc_lateral_setpoint)};
+	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(mpc_longitudinal_setpoint)};
 
 	hrt_abstime _last_run{0};
 	FwMpcDynamics _dynamics{};
