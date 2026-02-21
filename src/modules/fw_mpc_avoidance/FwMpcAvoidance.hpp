@@ -70,6 +70,10 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
+		(ParamFloat<px4::params::FW_MPC_OBS_TO>) _param_fw_mpc_obs_timeout,
+		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
+		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
+		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,
 		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
 		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,
 		(ParamFloat<px4::params::SIH_IYY>) _param_sih_iyy,

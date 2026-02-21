@@ -15,15 +15,6 @@
 
 using matrix::Quatf;
 using matrix::Vector3f;
-using namespace time_literals;
-
-namespace
-{
-static constexpr hrt_abstime kObstacleMsgTimeout = 500_ms;
-static constexpr float kObstacleTriggerDistanceMin = 25.f;
-static constexpr float kObstacleLookaheadTime = 3.f;
-static constexpr float kObstacleTriggerBias = 5.f;
-}
 
 const matrix::Vector3f FwMpcDynamics::_I_diag{0.02f, 0.02f, 0.04f};
 const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I = matrix::diag(FwMpcDynamics::_I_diag);
@@ -94,13 +85,19 @@ void FwMpcAvoidance::step_internal_model(const float dt)
 
 bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned) const
 {
-	if (_obstacle_count <= 0 || hrt_elapsed_time(&_time_obstacle_last_update) > kObstacleMsgTimeout) {
+	const hrt_abstime obstacle_timeout_us =
+		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
+
+	if (_obstacle_count <= 0 || hrt_elapsed_time(&_time_obstacle_last_update) > obstacle_timeout_us) {
 		return false;
 	}
 
 	const Vector3f pos_up{lpos.x, lpos.y, -lpos.z};
 	const float speed = vel_ned.norm();
-	const float trigger_distance = math::max(kObstacleTriggerDistanceMin, speed * kObstacleLookaheadTime + kObstacleTriggerBias);
+	const float dmin = math::max(_param_fw_mpc_obs_dmin.get(), 1.f);
+	const float lookahead_s = math::max(_param_fw_mpc_obs_lkhd.get(), 0.f);
+	const float bias = math::max(_param_fw_mpc_obs_bias.get(), 0.f);
+	const float trigger_distance = math::max(dmin, speed * lookahead_s + bias);
 
 	for (int i = 0; i < _obstacle_count; i++) {
 		const FwMpcController::Obstacle &obs = _obstacles[i];
