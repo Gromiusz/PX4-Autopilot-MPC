@@ -114,6 +114,15 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	return false;
 }
 
+bool FwMpcAvoidance::should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const
+{
+	const bool armed = (status.arming_state == vehicle_status_s::ARMING_STATE_ARMED);
+	const bool fixed_wing = (status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING) && !status.in_transition_mode;
+	const bool auto_position_control = control_mode.flag_control_position_enabled && !control_mode.flag_control_manual_enabled;
+
+	return armed && fixed_wing && auto_position_control;
+}
+
 void FwMpcAvoidance::Run()
 {
 	if (should_exit()) {
@@ -183,8 +192,13 @@ void FwMpcAvoidance::Run()
 	bool have_lat = false;
 	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
+	vehicle_status_s status{};
+	vehicle_control_mode_s control_mode{};
+	const bool have_status = _status_sub.copy(&status);
+	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
+	const bool mpc_allowed = have_status && have_control_mode && should_allow_mpc(status, control_mode);
 
-	if (_param_fw_mpc_avoid_en.get()) {
+	if (_param_fw_mpc_avoid_en.get() && mpc_allowed) {
 		vehicle_attitude_s att{};
 		vehicle_angular_velocity_s rates{};
 		vehicle_local_position_s lpos{};
