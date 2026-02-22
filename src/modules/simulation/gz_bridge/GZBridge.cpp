@@ -500,8 +500,11 @@ void GZBridge::poseInfoCallback(const gz::msgs::Pose_V &msg)
 {
 	const uint64_t timestamp = hrt_absolute_time();
 	static constexpr const char *kObstaclePrefix = "obstacle_";
-	static constexpr float kDefaultObstacleRadius = 8.f;
-	static constexpr float kDefaultObstacleMargin = 4.f;
+	// The mpc_obstacles world uses box obstacles of size 1x1x30 [m].
+	// For circular horizontal avoidance bounds, use half-diagonal of 1x1: sqrt(0.5^2 + 0.5^2) ~= 0.71 m.
+	static constexpr float kDefaultObstacleRadius = 0.71f;
+	static constexpr float kDefaultObstacleHeight = 30.f;
+	static constexpr float kDefaultObstacleMargin = 1.f;
 
 	fw_mpc_obstacles_s obstacles{};
 	obstacles.timestamp = timestamp;
@@ -521,6 +524,7 @@ void GZBridge::poseInfoCallback(const gz::msgs::Pose_V &msg)
 			obstacles.y[index] = obstacle_position.x();   // East
 			obstacles.z[index] = -obstacle_position.z();  // Down
 			obstacles.radius[index] = kDefaultObstacleRadius;
+			obstacles.height[index] = kDefaultObstacleHeight;
 			obstacles.margin[index] = kDefaultObstacleMargin;
 			obstacles.count++;
 		}

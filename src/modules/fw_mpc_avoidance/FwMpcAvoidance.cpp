@@ -11,9 +11,11 @@
 #include <drivers/drv_hrt.h>
 #include <lib/mathlib/mathlib.h>
 
+#include <cmath>
 #include <vector>
 
 using matrix::Quatf;
+using matrix::Vector2f;
 using matrix::Vector3f;
 
 const matrix::Vector3f FwMpcDynamics::_I_diag{0.02f, 0.02f, 0.04f};
@@ -96,7 +98,8 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 		return false;
 	}
 
-	const Vector3f pos_up{lpos.x, lpos.y, -lpos.z};
+	const Vector2f pos_xy{lpos.x, lpos.y};
+	const float pos_z_up = -lpos.z;
 	const float speed = vel_ned.norm();
 	const float dmin = math::max(_param_fw_mpc_obs_dmin.get(), 1.f);
 	const float lookahead_s = math::max(_param_fw_mpc_obs_lkhd.get(), 0.f);
@@ -106,10 +109,25 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 
 	for (int i = 0; i < _obstacle_count; i++) {
 		const FwMpcController::Obstacle &obs = _obstacles[i];
-		const float distance_to_surface = (obs.c - pos_up).norm() - (obs.R + obs.margin);
-		nearest_distance = math::min(nearest_distance, distance_to_surface);
+		const float Rbuf = obs.R + obs.margin;
+		const Vector2f obs_xy{obs.c(0), obs.c(1)};
+		const float horizontal_distance_to_surface = (obs_xy - pos_xy).norm() - Rbuf;
 
-		if (distance_to_surface < trigger_distance) {
+		if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
+			const float half_height_buffered = 0.5f * obs.height + obs.margin;
+			const float vertical_distance_to_surface = fabsf(pos_z_up - obs.c(2)) - half_height_buffered;
+			nearest_distance = math::min(nearest_distance, math::max(horizontal_distance_to_surface, vertical_distance_to_surface));
+
+			// Finite-height obstacle only applies in its vertical span.
+			if (vertical_distance_to_surface > 0.f) {
+				continue;
+			}
+
+		} else {
+			nearest_distance = math::min(nearest_distance, horizontal_distance_to_surface);
+		}
+
+		if (horizontal_distance_to_surface < trigger_distance) {
 			return true;
 		}
 	}
@@ -192,6 +210,7 @@ void FwMpcAvoidance::Run()
 				FwMpcController::Obstacle o{};
 				o.c = Vector3f{n, e, u};
 				o.R = obstacles_msg.radius[i];
+				o.height = obstacles_msg.height[i];
 				o.margin = obstacles_msg.margin[i];
 				obs.push_back(o);
 				_obstacles[i] = o;

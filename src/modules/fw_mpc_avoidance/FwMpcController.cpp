@@ -8,6 +8,7 @@
 #include <vector>
 
 using matrix::Matrix;
+using matrix::Vector2f;
 using matrix::Vector3f;
 using matrix::Vector4f;
 
@@ -619,25 +620,35 @@ void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateS
 		const int idx_dxk = k * kStateSize;
 
 		for (int j = 0; j < _n_obstacles; j++) {
-			const float Rbuf = _obstacles[j].R + _obstacles[j].margin;
-			Vector3f dvec = pbar - _obstacles[j].c;
-			float d = dvec.norm();
+			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
+				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
 
-			if (d < 1e-6f) {
-				d = 1e-6f;
-				dvec = Vector3f{1.f, 0.f, 0.f};
+				// Finite-height obstacle does not constrain the solution outside its vertical span.
+				if (vertical_distance_to_surface > 0.f) {
+					continue;
+				}
 			}
 
-			const float gbar = Rbuf - d;
-			const Vector3f gradg = -(dvec / d);
+			const float Rbuf = _obstacles[j].R + _obstacles[j].margin;
+			Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
+			float d_xy = dvec_xy.norm();
+
+			if (d_xy < 1e-6f) {
+				d_xy = 1e-6f;
+				dvec_xy = Vector2f{1.f, 0.f};
+			}
+
+			// Obstacle is modeled as a vertical cylinder, so only horizontal (XY) distance is constrained.
+			const float gbar = Rbuf - d_xy;
+			const Vector2f gradg_xy = -(dvec_xy / d_xy);
 
 			if (row_offset >= kMaxConstraints) {
 				return;
 			}
 
-			_A(row_offset, idx_dxk + 9) = gradg(0);
-			_A(row_offset, idx_dxk + 10) = gradg(1);
-			_A(row_offset, idx_dxk + 11) = gradg(2);
+			_A(row_offset, idx_dxk + 9) = gradg_xy(0);
+			_A(row_offset, idx_dxk + 10) = gradg_xy(1);
 			_u(row_offset) = -gbar;
 			_l(row_offset) = -OSQP_INFTY;
 			row_offset++;
