@@ -86,6 +86,8 @@ private:
 		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
 		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,
 		(ParamFloat<px4::params::FW_MPC_OBS_PLAN>) _param_fw_mpc_obs_plan,
+		(ParamFloat<px4::params::FW_MPC_OBS_CW>) _param_fw_mpc_obs_cw,
+		(ParamFloat<px4::params::FW_MPC_OBS_CD>) _param_fw_mpc_obs_cd,
 		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
 		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
 		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,

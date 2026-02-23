@@ -452,6 +452,51 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 		for (int i = 0; i < m; i++) {
 			_f(idx_duk + i) += fdu(i);
 		}
+
+		// Soft proximity cost around obstacles to encourage earlier lateral avoidance.
+		const float obs_weight = math::max(_weights.obstacle_proximity_weight, 0.f);
+		const float obs_distance = math::max(_weights.obstacle_proximity_distance, 0.f);
+
+		if (obs_weight > 0.f && obs_distance > 0.f && _n_obstacles > 0) {
+			const Vector3f pbar{xk(9), xk(10), xk(11)};
+
+			for (int j = 0; j < _n_obstacles; j++) {
+				if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
+					const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+					const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
+
+					// Same height gating as obstacle constraints.
+					if (vertical_distance_to_surface > 0.f) {
+						continue;
+					}
+				}
+
+				const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin;
+				Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
+				float d_xy = dvec_xy.norm();
+
+				if (d_xy < 1e-6f) {
+					d_xy = 1e-6f;
+					dvec_xy = Vector2f{1.f, 0.f};
+				}
+
+				const float proximity = (Rbuf + obs_distance) - d_xy;
+
+				if (proximity <= 0.f) {
+					continue;
+				}
+
+				const Vector2f grad_xy = -(dvec_xy / d_xy);
+				const float two_w = 2.f * obs_weight;
+
+				_f(idx_dxk + 9) += two_w * proximity * grad_xy(0);
+				_f(idx_dxk + 10) += two_w * proximity * grad_xy(1);
+				_H(idx_dxk + 9, idx_dxk + 9) += two_w * grad_xy(0) * grad_xy(0);
+				_H(idx_dxk + 9, idx_dxk + 10) += two_w * grad_xy(0) * grad_xy(1);
+				_H(idx_dxk + 10, idx_dxk + 9) += two_w * grad_xy(1) * grad_xy(0);
+				_H(idx_dxk + 10, idx_dxk + 10) += two_w * grad_xy(1) * grad_xy(1);
+			}
+		}
 	}
 
 	// Terminal position cost on last dx block

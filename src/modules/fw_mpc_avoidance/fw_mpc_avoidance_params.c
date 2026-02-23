@@ -104,3 +104,29 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 8.0f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 10.0f);
+
+/**
+ * Obstacle proximity cost weight.
+ *
+ * Adds a soft repulsive cost around obstacles in MPC objective.
+ * Higher values make the controller start turning away earlier.
+ *
+ * @min 0.0
+ * @max 100.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_CW, 3.0f);
+
+/**
+ * Obstacle proximity cost distance from obstacle surface.
+ *
+ * Repulsive cost is active within this horizontal distance from obstacle buffered surface.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 100.0
+ * @decimal 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 12.0f);

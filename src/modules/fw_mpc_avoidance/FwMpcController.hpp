@@ -36,9 +36,11 @@ public:
 		matrix::Matrix3f Qp{matrix::diag(matrix::Vector3f{4.f, 4.f, 6.f})};
 		float Qterm{20.f};
 		matrix::Matrix3f Qang{matrix::diag(matrix::Vector3f{0.25f, 0.60f, 0.80f})};
-		matrix::SquareMatrix<float, kControlSize> Rdu{matrix::diag(matrix::Vector4f{1.f, 1.f, 1.f, 0.15f})};
+		matrix::SquareMatrix<float, kControlSize> Rdu{matrix::diag(matrix::Vector4f{0.35f, 0.45f, 0.35f, 0.12f})};
 		matrix::SquareMatrix<float, kControlSize> Ru_abs{matrix::diag(matrix::Vector4f{0.03f, 0.03f, 0.03f, 0.03f})};
-		matrix::Vector4f Rrate_diag{0.5f, 0.5f, 0.5f, 0.10f};
+		matrix::Vector4f Rrate_diag{0.08f, 0.12f, 0.08f, 0.05f};
+		float obstacle_proximity_weight{3.0f};
+		float obstacle_proximity_distance{12.0f}; // [m] from obstacle surface
 		float obstacle_slack_linear{500.f};
 		float obstacle_slack_quadratic{2000.f};
 	};

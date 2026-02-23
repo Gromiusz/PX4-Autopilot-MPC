@@ -33,6 +33,8 @@ bool FwMpcAvoidance::init()
 	_controller.configure(_param_fw_mpc_avoid_dt.get(), FwMpcController::kMaxHorizon);
 	const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
 	_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
+	_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
+	_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
 
 	if (!_lpos_sub.registerCallback()) {
 		PX4_ERR("vehicle_local_position callback registration failed");
@@ -60,6 +62,8 @@ void FwMpcAvoidance::parameters_update()
 
 		const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
 		_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
+		_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
+		_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
 	}
 }
 
