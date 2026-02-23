@@ -22,7 +22,7 @@ PARAM_DEFINE_INT32(FW_MPC_AVOID_EN, 0);
  * @decimal 3
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.02f);
+PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.04f);
 
 /**
  * Hold last valid MPC setpoints after QP failure.

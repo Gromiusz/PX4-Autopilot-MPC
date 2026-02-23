@@ -18,10 +18,11 @@ class FwMpcController
 public:
 	static constexpr int kStateSize = FixedWingMpcModel::kStateSize;   // 12
 	static constexpr int kControlSize = FixedWingMpcModel::kControlSize; // 4
-	static constexpr int kMaxHorizon = 24;
-	static constexpr int kMaxVars = kMaxHorizon * (kStateSize + kControlSize); // dx (N*n) + du (N*m)
-	static constexpr int kMaxConstraints = 1200; // N*n eq + obstacle/rate/bounds
+	static constexpr int kMaxHorizon = 36;
 	static constexpr int kMaxObstacles = 4;
+	// dx (N*n) + du (N*m) + obstacle slacks (N*max_obstacles)
+	static constexpr int kMaxVars = kMaxHorizon * (kStateSize + kControlSize + kMaxObstacles);
+	static constexpr int kMaxConstraints = 1200; // N*n eq + obstacle/rate/bounds
 
 	using StateVec = FixedWingMpcModel::State;
 	using ControlVec = FixedWingMpcModel::Control;
@@ -38,6 +39,8 @@ public:
 		matrix::SquareMatrix<float, kControlSize> Rdu{matrix::diag(matrix::Vector4f{1.f, 1.f, 1.f, 0.15f})};
 		matrix::SquareMatrix<float, kControlSize> Ru_abs{matrix::diag(matrix::Vector4f{0.03f, 0.03f, 0.03f, 0.03f})};
 		matrix::Vector4f Rrate_diag{0.5f, 0.5f, 0.5f, 0.10f};
+		float obstacle_slack_linear{500.f};
+		float obstacle_slack_quadratic{2000.f};
 	};
 
 	struct Limits {
@@ -129,12 +132,11 @@ private:
 	bool solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints);
 
 	void addObstacleConstraints(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-				    const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
-				    int N, int &row_offset, int Nz_dx);
+				    int N, int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
 	void addRateConstraints(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
 				int &row_offset, int Nz_dx, int Nz_du);
 	void addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
-		       int &row_offset, int Nz_dx, int Nz_du);
+		       int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
 
 	FixedWingMpcModel _model{};
 

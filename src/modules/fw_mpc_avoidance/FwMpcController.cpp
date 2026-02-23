@@ -336,7 +336,13 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 	const int m = kControlSize;
 	const int Nz_dx = N * n;
 	const int Nz_du = N * m;
-	n_vars = Nz_dx + Nz_du;
+	const int Nz_slack = N * _n_obstacles;
+	n_vars = Nz_dx + Nz_du + Nz_slack;
+
+	if (n_vars > kMaxVars) {
+		PX4_ERR("QP var buffer overflow (%d > %d)", n_vars, kMaxVars);
+		return false;
+	}
 
 	_H.setZero();
 	_f.setZero();
@@ -493,13 +499,32 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 		}
 	}
 
-	addObstacleConstraints(xbar, x_ref_seq, N, row_offset, Nz_dx);
+	// Soft obstacle constraints: per-constraint nonnegative slack with strong linear/quadratic penalty.
+	if (Nz_slack > 0) {
+		const int idx_slack0 = Nz_dx + Nz_du;
+		const float w_lin = math::max(_weights.obstacle_slack_linear, 0.f);
+		const float w_quad = math::max(_weights.obstacle_slack_quadratic, 0.f);
+
+		for (int i = 0; i < Nz_slack; i++) {
+			const int idx = idx_slack0 + i;
+
+			if (w_quad > 0.f) {
+				_H(idx, idx) += 2.f * w_quad;
+			}
+
+			if (w_lin > 0.f) {
+				_f(idx) += w_lin;
+			}
+		}
+	}
+
+	addObstacleConstraints(xbar, N, row_offset, Nz_dx, Nz_du, Nz_slack);
 
 	if (_limits.use_stage_smoothness && _limits.use_rate_limits) {
 		addRateConstraints(ubar, N, row_offset, Nz_dx, Nz_du);
 	}
 
-	addBounds(ubar, N, row_offset, Nz_dx, Nz_du);
+	addBounds(ubar, N, row_offset, Nz_dx, Nz_du, Nz_slack);
 
 	if (row_offset > kMaxConstraints) {
 		PX4_ERR("QP constraint buffer overflow (%d > %d)", row_offset, kMaxConstraints);
@@ -613,15 +638,25 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 }
 
 void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, int N, int &row_offset, int Nz_dx)
+		int N, int &row_offset, int Nz_dx, int Nz_du, int Nz_slack)
 {
-	(void)x_ref_seq;
+	if (Nz_slack <= 0 || _n_obstacles <= 0) {
+		return;
+	}
+
+	const int idx_slack0 = Nz_dx + Nz_du;
 
 	for (int k = 0; k < N; k++) {
 		const Vector3f pbar{xbar(9, k), xbar(10, k), xbar(11, k)};
 		const int idx_dxk = k * kStateSize;
 
 		for (int j = 0; j < _n_obstacles; j++) {
+			const int idx_slack = idx_slack0 + k * _n_obstacles + j;
+
+			if (idx_slack >= (idx_slack0 + Nz_slack)) {
+				continue;
+			}
+
 			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
 				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
 				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
@@ -652,6 +687,7 @@ void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateS
 
 			_A(row_offset, idx_dxk + 9) = gradg_xy(0);
 			_A(row_offset, idx_dxk + 10) = gradg_xy(1);
+			_A(row_offset, idx_slack) = -1.f; // grad*dx <= -gbar + slack
 			_u(row_offset) = -gbar;
 			_l(row_offset) = -OSQP_INFTY;
 			row_offset++;
@@ -692,10 +728,8 @@ void FwMpcController::addRateConstraints(const matrix::Matrix<float, kControlSiz
 }
 
 void FwMpcController::addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N, int &row_offset,
-				int Nz_dx, int Nz_du)
+				int Nz_dx, int Nz_du, int Nz_slack)
 {
-	(void)Nz_du;
-
 	for (int k = 0; k < N; k++) {
 		const int idx_duk = Nz_dx + k * kControlSize;
 
@@ -709,5 +743,18 @@ void FwMpcController::addBounds(const matrix::Matrix<float, kControlSize, kMaxHo
 			_u(row_offset) = _limits.u_max(i) - ubar(i, k);
 			row_offset++;
 		}
+	}
+
+	const int idx_slack0 = Nz_dx + Nz_du;
+
+	for (int i = 0; i < Nz_slack; i++) {
+		if (row_offset >= kMaxConstraints) {
+			return;
+		}
+
+		_A(row_offset, idx_slack0 + i) = 1.f;
+		_l(row_offset) = 0.f;
+		_u(row_offset) = OSQP_INFTY;
+		row_offset++;
 	}
 }
