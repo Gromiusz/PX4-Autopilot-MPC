@@ -76,7 +76,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_DMIN, 25.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 3.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 4.0f);
 
 /**
  * Additional distance bias for obstacle activation.
@@ -89,7 +89,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 3.0f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 5.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 8.0f);
 
 /**
  * Additional horizontal planning margin for earlier turns.
@@ -103,4 +103,4 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 5.0f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 8.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 10.0f);
