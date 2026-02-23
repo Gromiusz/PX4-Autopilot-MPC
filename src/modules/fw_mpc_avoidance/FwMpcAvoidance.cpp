@@ -109,7 +109,7 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 
 	for (int i = 0; i < _obstacle_count; i++) {
 		const FwMpcController::Obstacle &obs = _obstacles[i];
-		const float Rbuf = obs.R + obs.margin;
+		const float Rbuf = obs.R + obs.margin + obs.planning_margin;
 		const Vector2f obs_xy{obs.c(0), obs.c(1)};
 		const float horizontal_distance_to_surface = (obs_xy - pos_xy).norm() - Rbuf;
 
@@ -212,6 +212,7 @@ void FwMpcAvoidance::Run()
 				o.R = obstacles_msg.radius[i];
 				o.height = obstacles_msg.height[i];
 				o.margin = obstacles_msg.margin[i];
+				o.planning_margin = math::max(_param_fw_mpc_obs_plan.get(), 0.f);
 				obs.push_back(o);
 				_obstacles[i] = o;
 			}
@@ -268,6 +269,7 @@ void FwMpcAvoidance::Run()
 		if (should_activate_now && !_mpc_active_last) {
 			// Reinitialize trim whenever MPC takes over again.
 			_mpc_ready = false;
+			_have_last_valid_mpc_setpoint = false;
 		}
 
 		if (should_activate_now) {
@@ -307,8 +309,9 @@ void FwMpcAvoidance::Run()
 				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
 				const float phi_cmd = math::constrain(x_pred(6), -roll_lim_rad, roll_lim_rad);
 				const float theta_cmd = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
+				const float throttle_min = math::constrain(_param_fw_thr_min.get(), 0.f, 1.f);
 				float throttle_norm = u_cmd(3) / math::max(_controller.limits().u_max(3), 0.1f);
-				throttle_norm = PX4_ISFINITE(throttle_norm) ? math::constrain(throttle_norm, 0.f, 1.f) : 0.f;
+				throttle_norm = PX4_ISFINITE(throttle_norm) ? math::constrain(throttle_norm, throttle_min, 1.f) : throttle_min;
 				float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd);
 				lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
 
@@ -325,6 +328,24 @@ void FwMpcAvoidance::Run()
 				lon_sp.throttle_direct = throttle_norm;
 				have_lat = true;
 				have_lon = true;
+				_last_valid_lat_sp = lat_sp;
+				_last_valid_lon_sp = lon_sp;
+				_time_last_valid_mpc_setpoint = now;
+				_have_last_valid_mpc_setpoint = true;
+
+			} else {
+				const hrt_abstime hold_timeout_us =
+					static_cast<hrt_abstime>(math::max(_param_fw_mpc_fail_hold.get(), 0.f) * 1e6f);
+
+				if (_have_last_valid_mpc_setpoint
+				    && hrt_elapsed_time(&_time_last_valid_mpc_setpoint) <= hold_timeout_us) {
+					lat_sp = _last_valid_lat_sp;
+					lon_sp = _last_valid_lon_sp;
+					lat_sp.timestamp = now;
+					lon_sp.timestamp = now;
+					have_lat = true;
+					have_lon = true;
+				}
 			}
 
 		} else if (have_state) {

@@ -70,19 +70,26 @@ private:
 	bool _mpc_ready{false};
 	bool _mpc_active_last{false};
 	hrt_abstime _time_obstacle_last_update{0};
+	hrt_abstime _time_last_valid_mpc_setpoint{0};
 	int _obstacle_count{0};
+	bool _have_last_valid_mpc_setpoint{false};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
+	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
+	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
+		(ParamFloat<px4::params::FW_MPC_FAIL_HOLD>) _param_fw_mpc_fail_hold,
 		(ParamFloat<px4::params::FW_MPC_OBS_TO>) _param_fw_mpc_obs_timeout,
 		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
 		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
 		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,
+		(ParamFloat<px4::params::FW_MPC_OBS_PLAN>) _param_fw_mpc_obs_plan,
 		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
 		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
 		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
 		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
 		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,
 		(ParamFloat<px4::params::SIH_IYY>) _param_sih_iyy,

@@ -25,6 +25,20 @@ PARAM_DEFINE_INT32(FW_MPC_AVOID_EN, 0);
 PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.02f);
 
 /**
+ * Hold last valid MPC setpoints after QP failure.
+ *
+ * While obstacle-triggered is active, publish the last valid MPC setpoints for this duration
+ * when the current QP solve fails. This avoids immediate handover to nominal FW setpoints.
+ *
+ * @unit s
+ * @min 0.0
+ * @max 5.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_FAIL_HOLD, 1.20f);
+
+/**
  * Obstacle message freshness timeout.
  *
  * If no obstacle update arrives within this time, MPC obstacle activation is disabled.
@@ -76,3 +90,17 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 3.0f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 5.0f);
+
+/**
+ * Additional horizontal planning margin for earlier turns.
+ *
+ * This value is added to obstacle radius/margin inside MPC constraints and activation logic.
+ * Increasing this makes the aircraft start avoidance earlier.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 100.0
+ * @decimal 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 8.0f);

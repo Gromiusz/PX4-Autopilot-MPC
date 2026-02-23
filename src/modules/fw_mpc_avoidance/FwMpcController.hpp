@@ -58,6 +58,7 @@ public:
 		float R{0.f};
 		float height{0.f}; // <= 0 means unbounded in Z
 		float margin{0.f};
+		float planning_margin{0.f};
 	};
 
 	struct QpDebug {
