@@ -41,8 +41,8 @@ public:
 		matrix::Vector4f Rrate_diag{0.08f, 0.12f, 0.08f, 0.05f};
 		float obstacle_proximity_weight{3.0f};
 		float obstacle_proximity_distance{12.0f}; // [m] from obstacle surface
-		float obstacle_slack_linear{500.f};
-		float obstacle_slack_quadratic{2000.f};
+		float obstacle_slack_linear{5000.f};
+		float obstacle_slack_quadratic{20000.f};
 	};
 
 	struct Limits {

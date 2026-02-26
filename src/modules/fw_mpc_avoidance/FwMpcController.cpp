@@ -14,8 +14,6 @@ using matrix::Vector4f;
 
 namespace
 {
-static constexpr float kMaxLinearizedObstacleViolation = 4.f;
-
 template<typename Mat>
 void denseToCSC(const Mat &M, int rows, int cols, bool upper_only,
 		std::vector<OSQPFloat> &data, std::vector<OSQPInt> &indices, std::vector<OSQPInt> &indptr)
@@ -722,8 +720,8 @@ void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateS
 			}
 
 			// Obstacle is modeled as a vertical cylinder, so only horizontal (XY) distance is constrained.
-			// Cap the linearized violation request to keep the QP numerically feasible in deep-penetration cases.
-			const float gbar = math::min(Rbuf - d_xy, kMaxLinearizedObstacleViolation);
+			// Use full linearized violation when inside obstacle, QP gets a strong push to exit.
+			const float gbar = Rbuf - d_xy;
 			const Vector2f gradg_xy = -(dvec_xy / d_xy);
 
 			if (row_offset >= kMaxConstraints) {
