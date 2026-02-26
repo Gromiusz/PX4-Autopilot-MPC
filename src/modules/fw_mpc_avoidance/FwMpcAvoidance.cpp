@@ -139,9 +139,113 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	return false;
 }
 
+bool FwMpcAvoidance::build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos,
+		const matrix::Vector3f &vel_ned, float yaw, float pitch_now, float nearest_distance,
+		float trigger_distance, hrt_abstime now, fixed_wing_lateral_setpoint_s &lat_sp,
+		fixed_wing_longitudinal_setpoint_s &lon_sp) const
+{
+	if (_obstacle_count <= 0) {
+		return false;
+	}
+
+	const Vector2f pos_xy{lpos.x, lpos.y};
+	const float pos_z_up = -lpos.z;
+	float best_horizontal_distance = INFINITY;
+	Vector2f best_obs_xy{};
+	bool found = false;
+
+	for (int i = 0; i < _obstacle_count; i++) {
+		const FwMpcController::Obstacle &obs = _obstacles[i];
+		const float Rbuf = obs.R + obs.margin + obs.planning_margin;
+		const Vector2f obs_xy{obs.c(0), obs.c(1)};
+		const float horizontal_distance_to_surface = (obs_xy - pos_xy).norm() - Rbuf;
+
+		if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
+			const float half_height_buffered = 0.5f * obs.height + obs.margin;
+			const float vertical_distance_to_surface = fabsf(pos_z_up - obs.c(2)) - half_height_buffered;
+
+			if (vertical_distance_to_surface > 0.f) {
+				continue;
+			}
+		}
+
+		if (!found || horizontal_distance_to_surface < best_horizontal_distance) {
+			best_horizontal_distance = horizontal_distance_to_surface;
+			best_obs_xy = obs_xy;
+			found = true;
+		}
+	}
+
+	if (!found) {
+		return false;
+	}
+
+	Vector2f away_xy = pos_xy - best_obs_xy;
+
+	if (away_xy.norm() < 1e-3f) {
+		away_xy = Vector2f{cosf(yaw + M_PI_2_F), sinf(yaw + M_PI_2_F)};
+	}
+
+	const float psi_away = atan2f(away_xy(1), away_xy(0));
+	const Vector2f vel_xy{vel_ned(0), vel_ned(1)};
+	const float psi_now = (vel_xy.norm() > 4.f) ? atan2f(vel_xy(1), vel_xy(0)) : yaw;
+	const float dpsi = matrix::wrap_pi(psi_away - psi_now);
+
+	float turn_sign = (dpsi >= 0.f) ? 1.f : -1.f;
+
+	if (fabsf(dpsi) < math::radians(8.f)
+	    && _have_last_valid_mpc_setpoint
+	    && PX4_ISFINITE(_last_valid_lat_sp.lateral_acceleration)
+	    && fabsf(_last_valid_lat_sp.lateral_acceleration) > 0.2f) {
+		turn_sign = (_last_valid_lat_sp.lateral_acceleration > 0.f) ? 1.f : -1.f;
+	}
+
+	float urgency = 0.75f;
+
+	if (PX4_ISFINITE(nearest_distance) && PX4_ISFINITE(trigger_distance) && trigger_distance > 1e-3f) {
+		urgency = math::constrain(1.f - nearest_distance / trigger_distance, 0.45f, 1.f);
+	}
+
+	if (PX4_ISFINITE(nearest_distance) && nearest_distance <= 0.f) {
+		urgency = 1.f;
+	}
+
+	const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+	const float max_lateral_accel = CONSTANTS_ONE_G * tanf(roll_lim_rad);
+	const float lateral_accel_cmd = turn_sign * urgency * max_lateral_accel;
+
+	const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
+	const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
+	float pitch_cmd = PX4_ISFINITE(pitch_now) ? pitch_now : math::radians(2.f);
+	pitch_cmd = math::constrain(pitch_cmd, pitch_min_rad, pitch_max_rad);
+
+	const float throttle_min = math::constrain(_param_fw_thr_min.get(), 0.f, 1.f);
+	float throttle_cmd = math::max(throttle_min, 0.35f);
+
+	if (_have_last_valid_mpc_setpoint && PX4_ISFINITE(_last_valid_lon_sp.throttle_direct)) {
+		throttle_cmd = math::max(throttle_cmd, _last_valid_lon_sp.throttle_direct);
+	}
+
+	throttle_cmd = math::constrain(throttle_cmd, throttle_min, 1.f);
+
+	lat_sp.timestamp = now;
+	lat_sp.course = NAN;
+	lat_sp.airspeed_direction = NAN;
+	lat_sp.lateral_acceleration = lateral_accel_cmd;
+
+	lon_sp.timestamp = now;
+	lon_sp.altitude = NAN;
+	lon_sp.height_rate = NAN;
+	lon_sp.equivalent_airspeed = NAN;
+	lon_sp.pitch_direct = pitch_cmd;
+	lon_sp.throttle_direct = throttle_cmd;
+
+	return true;
+}
+
 void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh,
-					bool obstacle_triggered, float nearest_distance, float trigger_distance,
-					float vehicle_speed, int qp_status, float model_pred_pos_error,
+					bool obstacle_triggered, bool emergency_turn_active, float nearest_distance,
+					float trigger_distance, float vehicle_speed, int qp_status, float model_pred_pos_error,
 					float model_pred_vel_error, float model_pred_att_error, float model_pred_age_s,
 					bool solve_success, float objective_value, int qp_iterations, float qp_solve_time_us)
 {
@@ -151,6 +255,7 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.mpc_active = mpc_active;
 	status.obstacle_data_fresh = obstacle_data_fresh;
 	status.obstacle_triggered = obstacle_triggered;
+	status.emergency_turn_active = emergency_turn_active;
 	status.obstacle_count = math::max(_obstacle_count, 0);
 	status.nearest_obstacle_distance = nearest_distance;
 	status.trigger_distance = trigger_distance;
@@ -255,6 +360,7 @@ void FwMpcAvoidance::Run()
 	float model_pred_att_error = NAN;
 	float model_pred_age_s = NAN;
 	bool obstacle_triggered = false;
+	bool emergency_turn_active = false;
 	vehicle_status_s status{};
 	vehicle_control_mode_s control_mode{};
 	const bool have_status = _status_sub.copy(&status);
@@ -373,17 +479,35 @@ void FwMpcAvoidance::Run()
 				_have_last_model_prediction = true;
 
 			} else {
-				const hrt_abstime hold_timeout_us =
-					static_cast<hrt_abstime>(math::max(_param_fw_mpc_fail_hold.get(), 0.f) * 1e6f);
+				bool have_emergency_setpoint = false;
 
-				if (_have_last_valid_mpc_setpoint
-				    && hrt_elapsed_time(&_time_last_valid_mpc_setpoint) <= hold_timeout_us) {
-					lat_sp = _last_valid_lat_sp;
-					lon_sp = _last_valid_lon_sp;
-					lat_sp.timestamp = now;
-					lon_sp.timestamp = now;
+				if (_param_fw_mpc_emerg_en.get() && obstacle_data_fresh && obstacle_triggered) {
+					have_emergency_setpoint = build_emergency_avoidance_setpoint(lpos, vel_N, euler.psi(), euler.theta(),
+								      nearest_obstacle_distance, trigger_distance, now, lat_sp, lon_sp);
+				}
+
+				if (have_emergency_setpoint) {
+					emergency_turn_active = true;
 					have_lat = true;
 					have_lon = true;
+					_last_valid_lat_sp = lat_sp;
+					_last_valid_lon_sp = lon_sp;
+					_time_last_valid_mpc_setpoint = now;
+					_have_last_valid_mpc_setpoint = true;
+
+				} else {
+					const hrt_abstime hold_timeout_us =
+						static_cast<hrt_abstime>(math::max(_param_fw_mpc_fail_hold.get(), 0.f) * 1e6f);
+
+					if (_have_last_valid_mpc_setpoint
+					    && hrt_elapsed_time(&_time_last_valid_mpc_setpoint) <= hold_timeout_us) {
+						lat_sp = _last_valid_lat_sp;
+						lon_sp = _last_valid_lon_sp;
+						lat_sp.timestamp = now;
+						lon_sp.timestamp = now;
+						have_lat = true;
+						have_lon = true;
+					}
 				}
 			}
 
@@ -399,7 +523,8 @@ void FwMpcAvoidance::Run()
 
 	_mpc_active_last = mpc_active_now;
 	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
-	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, nearest_obstacle_distance,
+	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, emergency_turn_active,
+			   nearest_obstacle_distance,
 			   trigger_distance, vehicle_speed, _controller.last_qp_status(), model_pred_pos_error,
 			   model_pred_vel_error, model_pred_att_error, model_pred_age_s, qp_debug.solve_success,
 			   qp_debug.objective_value, qp_debug.iterations, qp_debug.solve_time_us);

@@ -12,17 +12,31 @@
 PARAM_DEFINE_INT32(FW_MPC_AVOID_EN, 0);
 
 /**
+ * Enable emergency fallback turn when MPC QP solve fails near obstacle.
+ *
+ * When enabled, the module can generate a direct avoidance turn setpoint if the QP
+ * fails while obstacle-triggered mode is active.
+ *
+ * @value 0 Disabled
+ * @value 1 Enabled
+ * @min 0
+ * @max 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_INT32(FW_MPC_EMERG_EN, 0);
+
+/**
  * Internal MPC model integration step [s].
  *
  * Sets the integration step used by the internal SIH-like model during rollouts.
  *
  * @unit s
  * @min 0.005
- * @max 0.05
+ * @max 0.08
  * @decimal 3
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.04f);
+PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.05f);
 
 /**
  * Hold last valid MPC setpoints after QP failure.
