@@ -55,17 +55,31 @@ private:
 	static constexpr float SPAN = 1.48f;       // [m]
 	static constexpr float MAC = 0.22f;        // [m]
 	static constexpr float WING_AR = 6.5f;     // [-]
+	static constexpr float WING_AC_X = -0.12f; // [m] from AdvancedLiftDrag cp
 	static constexpr float RP = 0.10f;         // prop radius [m]
 	static constexpr float FLAP_MAX = 0.78f;   // [rad] servo joint limits in gz advanced_plane
+
+	// Tail/fin placement from control surface joints in model.sdf (elevator/rudder at x=-0.5 m).
+	static constexpr float TAIL_SPAN = 0.52f;  // [m]
+	static constexpr float TAIL_MAC = 0.12f;   // [m]
+	static constexpr float TAIL_AR = 4.3f;     // [-]
+	static constexpr float TAIL_CF = 0.06f;    // [m]
+	static constexpr float TAIL_X = -0.50f;    // [m]
+	static constexpr float FIN_SPAN = 0.30f;   // [m]
+	static constexpr float FIN_MAC = 0.18f;    // [m]
+	static constexpr float FIN_AR = 1.7f;      // [-]
+	static constexpr float FIN_CF = 0.12f;     // [m]
+	static constexpr float FIN_X = -0.50f;     // [m]
+	static constexpr float FIN_Z_FRD = -0.05f; // [m] rudder z=+0.05 in gz (up), converted to FRD
 
 	float _kdv{1.0f};         // linear drag (N/(m/s))
 	float _kdw{0.025f};       // angular damper (Nm/(rad/s))
 
-	AeroSeg _wing_l{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(0.0f, -SPAN / 4.0f, 0.0f), 3.0f,
+	AeroSeg _wing_l{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(WING_AC_X, -SPAN / 4.0f, 0.0f), 3.0f,
 			WING_AR, MAC / 3.0f};
-	AeroSeg _wing_r{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(0.0f, SPAN / 4.0f, 0.0f), -3.0f,
+	AeroSeg _wing_r{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(WING_AC_X, SPAN / 4.0f, 0.0f), -3.0f,
 			WING_AR, MAC / 3.0f};
-	AeroSeg _tailplane{0.3f, 0.1f, 0.0f, matrix::Vector3f(-0.4f, 0.0f, 0.0f), 0.0f, -1.0f, 0.05f, RP};
-	AeroSeg _fin{0.25f, 0.18f, 0.0f, matrix::Vector3f(-0.45f, 0.0f, -0.1f), -90.0f, -1.0f, 0.12f, RP};
-	AeroSeg _fuselage{0.2f, 0.8f, 0.0f, matrix::Vector3f(0.0f, 0.0f, 0.0f), -90.0f};
+	AeroSeg _tailplane{TAIL_SPAN, TAIL_MAC, 0.0f, matrix::Vector3f(TAIL_X, 0.0f, 0.0f), 0.0f, TAIL_AR, TAIL_CF, RP};
+	AeroSeg _fin{FIN_SPAN, FIN_MAC, 0.0f, matrix::Vector3f(FIN_X, 0.0f, FIN_Z_FRD), -90.0f, FIN_AR, FIN_CF, RP};
+	AeroSeg _fuselage{0.47f, 0.11f, 0.0f, matrix::Vector3f(0.0f, 0.0f, 0.0f), -90.0f};
 };
