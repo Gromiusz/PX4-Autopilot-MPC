@@ -47,7 +47,9 @@ private:
 				 float &nearest_distance, float &trigger_distance) const;
 	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
 			       float nearest_distance, float trigger_distance, float vehicle_speed, int qp_status,
-			       bool solve_success, float objective_value, int qp_iterations, float qp_solve_time_us);
+			       float model_pred_pos_error, float model_pred_vel_error, float model_pred_att_error,
+			       float model_pred_age_s, bool solve_success, float objective_value, int qp_iterations,
+			       float qp_solve_time_us);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
@@ -71,8 +73,11 @@ private:
 	bool _mpc_active_last{false};
 	hrt_abstime _time_obstacle_last_update{0};
 	hrt_abstime _time_last_valid_mpc_setpoint{0};
+	hrt_abstime _time_last_model_prediction{0};
 	int _obstacle_count{0};
 	bool _have_last_valid_mpc_setpoint{false};
+	bool _have_last_model_prediction{false};
+	FwMpcController::StateVec _last_model_prediction{};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
 	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};

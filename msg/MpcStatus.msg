@@ -10,6 +10,10 @@ uint8[3] padding0
 float32 nearest_obstacle_distance
 float32 trigger_distance
 float32 vehicle_speed
+float32 model_pred_pos_error
+float32 model_pred_vel_error
+float32 model_pred_att_error
+float32 model_pred_age_s
 
 bool solve_success
 uint8[3] padding1

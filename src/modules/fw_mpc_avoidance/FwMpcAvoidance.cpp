@@ -141,8 +141,9 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 
 void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh,
 					bool obstacle_triggered, float nearest_distance, float trigger_distance,
-					float vehicle_speed, int qp_status, bool solve_success, float objective_value,
-					int qp_iterations, float qp_solve_time_us)
+					float vehicle_speed, int qp_status, float model_pred_pos_error,
+					float model_pred_vel_error, float model_pred_att_error, float model_pred_age_s,
+					bool solve_success, float objective_value, int qp_iterations, float qp_solve_time_us)
 {
 	mpc_status_s status{};
 	status.timestamp = hrt_absolute_time();
@@ -154,6 +155,10 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.nearest_obstacle_distance = nearest_distance;
 	status.trigger_distance = trigger_distance;
 	status.vehicle_speed = vehicle_speed;
+	status.model_pred_pos_error = model_pred_pos_error;
+	status.model_pred_vel_error = model_pred_vel_error;
+	status.model_pred_att_error = model_pred_att_error;
+	status.model_pred_age_s = model_pred_age_s;
 	status.solve_success = solve_success;
 	status.objective_value = objective_value;
 	status.qp_iterations = qp_iterations;
@@ -245,6 +250,10 @@ void FwMpcAvoidance::Run()
 	float nearest_obstacle_distance = NAN;
 	float trigger_distance = NAN;
 	float vehicle_speed = NAN;
+	float model_pred_pos_error = NAN;
+	float model_pred_vel_error = NAN;
+	float model_pred_att_error = NAN;
+	float model_pred_age_s = NAN;
 	bool obstacle_triggered = false;
 	vehicle_status_s status{};
 	vehicle_control_mode_s control_mode{};
@@ -274,6 +283,7 @@ void FwMpcAvoidance::Run()
 			// Reinitialize trim whenever MPC takes over again.
 			_mpc_ready = false;
 			_have_last_valid_mpc_setpoint = false;
+			_have_last_model_prediction = false;
 		}
 
 		if (should_activate_now) {
@@ -295,6 +305,28 @@ void FwMpcAvoidance::Run()
 			x_now(9) = lpos.x;
 			x_now(10) = lpos.y;
 			x_now(11) = -lpos.z; // up
+
+			if (_have_last_model_prediction) {
+				const float pred_age_s = (now - _time_last_model_prediction) * 1e-6f;
+				const float model_dt_s = math::max(_param_fw_mpc_avoid_dt.get(), 1e-3f);
+
+				if (pred_age_s >= 0.5f * model_dt_s && pred_age_s <= 2.f * model_dt_s) {
+					model_pred_age_s = pred_age_s;
+
+					const Vector3f pos_now{x_now(9), x_now(10), x_now(11)};
+					const Vector3f pos_pred{_last_model_prediction(9), _last_model_prediction(10), _last_model_prediction(11)};
+					model_pred_pos_error = (pos_now - pos_pred).norm();
+
+					const Vector3f vel_now{x_now(0), x_now(1), x_now(2)};
+					const Vector3f vel_pred{_last_model_prediction(0), _last_model_prediction(1), _last_model_prediction(2)};
+					model_pred_vel_error = (vel_now - vel_pred).norm();
+
+					const float dphi = matrix::wrap_pi(x_now(6) - _last_model_prediction(6));
+					const float dtheta = matrix::wrap_pi(x_now(7) - _last_model_prediction(7));
+					const float dpsi = matrix::wrap_pi(x_now(8) - _last_model_prediction(8));
+					model_pred_att_error = sqrtf(dphi * dphi + dtheta * dtheta + dpsi * dpsi);
+				}
+			}
 
 			const matrix::Vector3f goal_up{lpos_sp.x, lpos_sp.y, -lpos_sp.z};
 
@@ -336,6 +368,9 @@ void FwMpcAvoidance::Run()
 				_last_valid_lon_sp = lon_sp;
 				_time_last_valid_mpc_setpoint = now;
 				_have_last_valid_mpc_setpoint = true;
+				_last_model_prediction = x_pred;
+				_time_last_model_prediction = now;
+				_have_last_model_prediction = true;
 
 			} else {
 				const hrt_abstime hold_timeout_us =
@@ -358,10 +393,15 @@ void FwMpcAvoidance::Run()
 		}
 	}
 
+	if (!mpc_active_now) {
+		_have_last_model_prediction = false;
+	}
+
 	_mpc_active_last = mpc_active_now;
 	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
 	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, nearest_obstacle_distance,
-			   trigger_distance, vehicle_speed, _controller.last_qp_status(), qp_debug.solve_success,
+			   trigger_distance, vehicle_speed, _controller.last_qp_status(), model_pred_pos_error,
+			   model_pred_vel_error, model_pred_att_error, model_pred_age_s, qp_debug.solve_success,
 			   qp_debug.objective_value, qp_debug.iterations, qp_debug.solve_time_us);
 
 	if (have_lat) {
