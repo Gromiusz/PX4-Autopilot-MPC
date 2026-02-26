@@ -380,19 +380,34 @@ void FwMpcAvoidance::Run()
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 		vehicle_speed = vel_N.norm();
-		const bool should_activate_now = have_state && have_goal
-						&& should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance);
-		obstacle_triggered = should_activate_now;
-		mpc_active_now = should_activate_now;
+		const bool trigger_now = have_state && have_goal
+				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance);
+		obstacle_triggered = trigger_now;
 
-		if (should_activate_now && !_mpc_active_last) {
+		if (trigger_now) {
+			_time_last_obstacle_trigger = now;
+		}
+
+		if (trigger_now) {
+			mpc_active_now = true;
+
+		} else if (_mpc_active_last && obstacle_data_fresh && have_state && have_goal) {
+			const float exit_hysteresis = math::max(_param_fw_mpc_act_hys.get(), 0.f);
+			const hrt_abstime deact_hold_us = static_cast<hrt_abstime>(math::max(_param_fw_mpc_deact_t.get(), 0.f) * 1e6f);
+			const bool keep_by_distance = PX4_ISFINITE(nearest_obstacle_distance) && PX4_ISFINITE(trigger_distance)
+						      && (nearest_obstacle_distance < (trigger_distance + exit_hysteresis));
+			const bool keep_by_time = hrt_elapsed_time(&_time_last_obstacle_trigger) <= deact_hold_us;
+			mpc_active_now = keep_by_distance || keep_by_time;
+		}
+
+		if (mpc_active_now && !_mpc_active_last) {
 			// Reinitialize trim whenever MPC takes over again.
 			_mpc_ready = false;
 			_have_last_valid_mpc_setpoint = false;
 			_have_last_model_prediction = false;
 		}
 
-		if (should_activate_now) {
+		if (mpc_active_now && have_state && have_goal) {
 			const matrix::Quatf q(att.q);
 			const matrix::Dcmf R_nb{q};
 			const matrix::Vector3f vel_B = R_nb.transpose() * vel_N;

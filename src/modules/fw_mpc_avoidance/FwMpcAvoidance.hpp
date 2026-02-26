@@ -76,6 +76,7 @@ private:
 	bool _mpc_ready{false};
 	bool _mpc_active_last{false};
 	hrt_abstime _time_obstacle_last_update{0};
+	hrt_abstime _time_last_obstacle_trigger{0};
 	hrt_abstime _time_last_valid_mpc_setpoint{0};
 	hrt_abstime _time_last_model_prediction{0};
 	int _obstacle_count{0};
@@ -91,6 +92,8 @@ private:
 		(ParamBool<px4::params::FW_MPC_EMERG_EN>) _param_fw_mpc_emerg_en,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
 		(ParamFloat<px4::params::FW_MPC_FAIL_HOLD>) _param_fw_mpc_fail_hold,
+		(ParamFloat<px4::params::FW_MPC_ACT_HYS>) _param_fw_mpc_act_hys,
+		(ParamFloat<px4::params::FW_MPC_DEACT_T>) _param_fw_mpc_deact_t,
 		(ParamFloat<px4::params::FW_MPC_OBS_TO>) _param_fw_mpc_obs_timeout,
 		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
 		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,

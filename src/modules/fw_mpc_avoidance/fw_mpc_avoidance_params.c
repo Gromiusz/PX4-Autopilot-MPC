@@ -53,6 +53,34 @@ PARAM_DEFINE_FLOAT(FW_MPC_AVOID_DT, 0.05f);
 PARAM_DEFINE_FLOAT(FW_MPC_FAIL_HOLD, 1.20f);
 
 /**
+ * Distance hysteresis for MPC deactivation.
+ *
+ * When MPC is already active, it remains active until the nearest obstacle distance
+ * exceeds (trigger distance + FW_MPC_ACT_HYS), unless timeout hold is still active.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 100.0
+ * @decimal 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_ACT_HYS, 8.0f);
+
+/**
+ * Deactivation hold time after last trigger.
+ *
+ * Additional hold time for MPC activity after obstacle trigger becomes false.
+ * Helps avoid rapid on/off flicker near the trigger boundary.
+ *
+ * @unit s
+ * @min 0.0
+ * @max 5.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_DEACT_T, 0.60f);
+
+/**
  * Obstacle message freshness timeout.
  *
  * If no obstacle update arrives within this time, MPC obstacle activation is disabled.
