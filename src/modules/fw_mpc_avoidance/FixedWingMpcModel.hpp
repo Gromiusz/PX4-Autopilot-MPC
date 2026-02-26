@@ -123,17 +123,18 @@ private:
 		return R;
 	}
 
-	float _mass = 2.5f;
-	matrix::Matrix3f _I{matrix::diag(matrix::Vector3f{0.20f, 0.30f, 1.00f})};
-	matrix::Matrix3f _I_inv{matrix::diag(matrix::Vector3f{1.f / 0.20f, 1.f / 0.30f, 1.f / 1.00f})};
-	const float _S = 0.50f;
-	const float _b = 2.00f;
-	const float _c = 0.25f;
-	const float _rho = 1.225f;
+	// Defaults aligned with Tools/simulation/gz/models/advanced_plane/model.sdf
+	float _mass = 1.0f;
+	matrix::Matrix3f _I{matrix::diag(matrix::Vector3f{0.197563f, 0.1458929f, 0.1477f})};
+	matrix::Matrix3f _I_inv{matrix::diag(matrix::Vector3f{1.f / 0.197563f, 1.f / 0.1458929f, 1.f / 0.1477f})};
+	const float _S = 0.34f;
+	const float _b = 6.5f * 0.22f; // AR * mac from gz advanced_plane
+	const float _c = 0.22f;
+	const float _rho = 1.2041f;
 	const float _g = 9.81f;
-	const float _CL0 = 0.30f;
-	const float _CL_alpha = 4.5f;
-	const float _CD0 = 0.035f;
-	const float _k = 0.040f;
+	const float _CL0 = 0.15188f;
+	const float _CL_alpha = 5.015f;
+	const float _CD0 = 0.029f;
+	const float _k = 1.f / (M_PI_F * 0.97f * 6.5f);
 	mutable FwMpcAero _aero{};
 };

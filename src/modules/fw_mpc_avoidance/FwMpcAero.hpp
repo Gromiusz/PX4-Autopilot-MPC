@@ -51,18 +51,20 @@ public:
 	}
 
 private:
-	static constexpr float SPAN = 0.86f;       // [m]
-	static constexpr float MAC = 0.21f;        // [m]
+	// Matched to Tools/simulation/gz/models/advanced_plane/model.sdf reference geometry.
+	static constexpr float SPAN = 1.48f;       // [m]
+	static constexpr float MAC = 0.22f;        // [m]
+	static constexpr float WING_AR = 6.5f;     // [-]
 	static constexpr float RP = 0.10f;         // prop radius [m]
-	static constexpr float FLAP_MAX = M_PI_F / 12.f; // 15 deg
+	static constexpr float FLAP_MAX = 0.78f;   // [rad] servo joint limits in gz advanced_plane
 
 	float _kdv{1.0f};         // linear drag (N/(m/s))
 	float _kdw{0.025f};       // angular damper (Nm/(rad/s))
 
-	AeroSeg _wing_l{SPAN / 2.0f, MAC, -4.0f, matrix::Vector3f(0.0f, -SPAN / 4.0f, 0.0f), 3.0f,
-			SPAN / MAC, MAC / 3.0f};
-	AeroSeg _wing_r{SPAN / 2.0f, MAC, -4.0f, matrix::Vector3f(0.0f, SPAN / 4.0f, 0.0f), -3.0f,
-			SPAN / MAC, MAC / 3.0f};
+	AeroSeg _wing_l{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(0.0f, -SPAN / 4.0f, 0.0f), 3.0f,
+			WING_AR, MAC / 3.0f};
+	AeroSeg _wing_r{SPAN / 2.0f, MAC, -1.74f, matrix::Vector3f(0.0f, SPAN / 4.0f, 0.0f), -3.0f,
+			WING_AR, MAC / 3.0f};
 	AeroSeg _tailplane{0.3f, 0.1f, 0.0f, matrix::Vector3f(-0.4f, 0.0f, 0.0f), 0.0f, -1.0f, 0.05f, RP};
 	AeroSeg _fin{0.25f, 0.18f, 0.0f, matrix::Vector3f(-0.45f, 0.0f, -0.1f), -90.0f, -1.0f, 0.12f, RP};
 	AeroSeg _fuselage{0.2f, 0.8f, 0.0f, matrix::Vector3f(0.0f, 0.0f, 0.0f), -90.0f};
