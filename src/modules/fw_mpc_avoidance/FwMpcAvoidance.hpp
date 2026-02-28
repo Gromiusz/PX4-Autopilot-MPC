@@ -84,7 +84,6 @@ private:
 	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(mpc_lateral_setpoint)};
 	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(mpc_longitudinal_setpoint)};
 	uORB::Publication<obstacle_position_s> _obstacle_position_pub{ORB_ID(obstacle_position)};
-	uORB::Publication<mission_setpoint_position_s> _mission_setpoint_position_pub{ORB_ID(mission_setpoint_position)};
 	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
@@ -114,6 +113,8 @@ private:
 	fw_mpc_obstacles_s _latest_obstacles_msg{};
 	obstacle_position_s _last_obstacle_position_msg{};
 	mission_setpoint_position_s _last_mission_setpoint_position_msg{};
+	orb_advert_t _mission_setpoint_position_pub_handles[mission_setpoint_position_s::MAX_CHUNKS]{};
+	uint8_t _mission_setpoint_position_pub_count{0};
 	uint64_t _last_mission_ref_timestamp{0};
 	uint32_t _last_home_update_count{0};
 

@@ -178,17 +178,13 @@ void FwMpcAvoidance::publish_mission_setpoint_position(const vehicle_local_posit
 	msg.mission_id = mission != nullptr ? mission->mission_id : 0;
 	msg.current_seq = mission != nullptr ? mission->current_seq : -1;
 	msg.mission_item_count = mission != nullptr ? mission->count : 0;
+	msg.total_setpoint_count = 0;
 	msg.setpoint_count = 0;
+	msg.chunk_index = 0;
+	msg.chunk_count = 1;
 	msg.reference_valid = false;
 	msg.home_alt_valid = home_pos != nullptr && home_pos->valid_alt && PX4_ISFINITE(home_pos->alt);
 	msg.truncated = false;
-
-	for (uint16_t i = 0; i < mission_setpoint_position_s::MAX_SETPOINTS; i++) {
-		msg.sequence[i] = UINT16_MAX;
-		msg.north[i] = NAN;
-		msg.east[i] = NAN;
-		msg.down[i] = NAN;
-	}
 
 	const bool have_global_ref = lpos != nullptr
 				     && lpos->xy_global
@@ -196,6 +192,16 @@ void FwMpcAvoidance::publish_mission_setpoint_position(const vehicle_local_posit
 				     && PX4_ISFINITE(lpos->ref_lat)
 				     && PX4_ISFINITE(lpos->ref_lon)
 				     && PX4_ISFINITE(lpos->ref_alt);
+
+	struct MissionSetpointEntry {
+		uint16_t sequence;
+		float north;
+		float east;
+		float down;
+	};
+
+	std::vector<MissionSetpointEntry> setpoints;
+	setpoints.reserve(mission != nullptr ? mission->count : 0);
 
 	if (!have_global_ref || mission == nullptr) {
 		msg.reference_valid = false;
@@ -245,52 +251,67 @@ void FwMpcAvoidance::publish_mission_setpoint_position(const vehicle_local_posit
 				continue;
 			}
 
-			if (msg.setpoint_count >= mission_setpoint_position_s::MAX_SETPOINTS) {
-				msg.truncated = true;
-				break;
+				float north = NAN;
+				float east = NAN;
+				projection.project(item.lat, item.lon, north, east);
+				const float down = -(altitude_amsl - lpos->ref_alt);
+
+				setpoints.push_back(MissionSetpointEntry{i, north, east, down});
 			}
+		}
 
-			float north = NAN;
-			float east = NAN;
-			projection.project(item.lat, item.lon, north, east);
-			const float down = -(altitude_amsl - lpos->ref_alt);
+	msg.total_setpoint_count = static_cast<uint16_t>(setpoints.size());
+	const uint8_t chunk_count = math::max<uint8_t>(1,
+				 static_cast<uint8_t>((setpoints.size() + mission_setpoint_position_s::MAX_SETPOINTS - 1)
+				 / mission_setpoint_position_s::MAX_SETPOINTS));
+	msg.chunk_count = math::min(chunk_count, mission_setpoint_position_s::MAX_CHUNKS);
+	msg.truncated = setpoints.size() > (mission_setpoint_position_s::MAX_SETPOINTS * mission_setpoint_position_s::MAX_CHUNKS);
 
-			const uint16_t index = msg.setpoint_count++;
-			msg.sequence[index] = i;
-			msg.north[index] = north;
-			msg.east[index] = east;
-			msg.down[index] = down;
+	for (uint8_t chunk = 0; chunk < msg.chunk_count; chunk++) {
+		mission_setpoint_position_s chunk_msg = msg;
+		chunk_msg.chunk_index = chunk;
+		chunk_msg.setpoint_count = 0;
+
+		for (uint16_t i = 0; i < mission_setpoint_position_s::MAX_SETPOINTS; i++) {
+			chunk_msg.sequence[i] = UINT16_MAX;
+			chunk_msg.north[i] = NAN;
+			chunk_msg.east[i] = NAN;
+			chunk_msg.down[i] = NAN;
+		}
+
+		const size_t start = chunk * mission_setpoint_position_s::MAX_SETPOINTS;
+		const size_t remaining = setpoints.size() > start ? setpoints.size() - start : 0;
+		const uint16_t copy_count = math::min<uint16_t>(remaining, mission_setpoint_position_s::MAX_SETPOINTS);
+		chunk_msg.setpoint_count = copy_count;
+
+		for (uint16_t i = 0; i < copy_count; i++) {
+			const MissionSetpointEntry &entry = setpoints[start + i];
+			chunk_msg.sequence[i] = entry.sequence;
+			chunk_msg.north[i] = entry.north;
+			chunk_msg.east[i] = entry.east;
+			chunk_msg.down[i] = entry.down;
+		}
+
+		if (_mission_setpoint_position_pub_handles[chunk] == nullptr) {
+			int instance = chunk;
+			_mission_setpoint_position_pub_handles[chunk] =
+				orb_advertise_multi(ORB_ID(mission_setpoint_position), &chunk_msg, &instance);
+
+		} else {
+			orb_publish(ORB_ID(mission_setpoint_position), _mission_setpoint_position_pub_handles[chunk], &chunk_msg);
 		}
 	}
 
-	auto equal_or_both_nan = [](float a, float b) {
-		return (PX4_ISFINITE(a) && PX4_ISFINITE(b) && fabsf(a - b) < 1e-4f)
-		       || (!PX4_ISFINITE(a) && !PX4_ISFINITE(b));
-	};
-
-	bool changed = !_have_last_mission_setpoint_position_publish
-		       || msg.mission_id != _last_mission_setpoint_position_msg.mission_id
-		       || msg.current_seq != _last_mission_setpoint_position_msg.current_seq
-		       || msg.mission_item_count != _last_mission_setpoint_position_msg.mission_item_count
-		       || msg.setpoint_count != _last_mission_setpoint_position_msg.setpoint_count
-		       || msg.reference_valid != _last_mission_setpoint_position_msg.reference_valid
-		       || msg.home_alt_valid != _last_mission_setpoint_position_msg.home_alt_valid
-		       || msg.truncated != _last_mission_setpoint_position_msg.truncated;
-
-	for (uint16_t i = 0; i < mission_setpoint_position_s::MAX_SETPOINTS && !changed; i++) {
-		changed = msg.sequence[i] != _last_mission_setpoint_position_msg.sequence[i]
-			  || !equal_or_both_nan(msg.north[i], _last_mission_setpoint_position_msg.north[i])
-			  || !equal_or_both_nan(msg.east[i], _last_mission_setpoint_position_msg.east[i])
-			  || !equal_or_both_nan(msg.down[i], _last_mission_setpoint_position_msg.down[i]);
+	for (uint8_t chunk = msg.chunk_count; chunk < _mission_setpoint_position_pub_count; chunk++) {
+		if (_mission_setpoint_position_pub_handles[chunk] != nullptr) {
+			orb_unadvertise(_mission_setpoint_position_pub_handles[chunk]);
+			_mission_setpoint_position_pub_handles[chunk] = nullptr;
+		}
 	}
 
-	if (!changed) {
-		return;
-	}
-
-	_mission_setpoint_position_pub.publish(msg);
-	_last_mission_setpoint_position_msg = msg;
+	_mission_setpoint_position_pub_count = msg.chunk_count;
 	_have_last_mission_setpoint_position_publish = true;
+	_last_mission_setpoint_position_msg = msg;
 }
 
 void FwMpcAvoidance::maybe_log_waypoint_setpoint(const vehicle_local_position_setpoint_s &lpos_sp)

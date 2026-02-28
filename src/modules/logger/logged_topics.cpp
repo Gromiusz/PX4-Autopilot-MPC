@@ -156,7 +156,7 @@ void LoggedTopics::add_default_topics()
 	add_topic("fixed_wing_longitudinal_setpoint");
 	add_optional_topic("fw_mpc_obstacles", 100);
 	add_topic("obstacle_position", 100);
-	add_topic("mission_setpoint_position", 500);
+	add_topic_multi("mission_setpoint_position", 500, 4);
 	add_topic("mpc_status", 100);
 	add_topic("mpc_lateral_setpoint", 50);
 	add_topic("mpc_longitudinal_setpoint", 50);
