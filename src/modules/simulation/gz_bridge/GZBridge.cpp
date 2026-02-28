@@ -43,6 +43,99 @@
 #include <iostream>
 #include <string>
 
+bool GZBridge::loadObstacleGeometry()
+{
+	static constexpr const char *kObstaclePrefix = "obstacle_";
+	static constexpr float kDefaultObstacleRadius = 0.71f;
+	static constexpr float kDefaultObstacleHeight = 30.f;
+	static constexpr float kDefaultObstacleMargin = 1.f;
+
+	_obstacle_geometry.clear();
+	_obstacle_geometry_loaded = true;
+
+	const std::string world_path = std::string(PX4_GZ_WORLDS_DIR) + "/" + _world_name + ".sdf";
+
+	sdf::SDFPtr sdf_element(new sdf::SDF());
+	sdf::init(sdf_element);
+
+	if (!sdf::readFile(world_path, sdf_element)) {
+		PX4_WARN("failed to read world SDF: %s", world_path.c_str());
+		return false;
+	}
+
+	const sdf::ElementPtr root = sdf_element->Root();
+
+	if (!root || !root->HasElement("world")) {
+		PX4_WARN("world SDF missing <world>: %s", world_path.c_str());
+		return false;
+	}
+
+	for (sdf::ElementPtr model = root->GetElement("world")->GetElement("model");
+	     model; model = model->GetNextElement("model")) {
+		const std::string model_name = model->Get<std::string>("name");
+
+		if (model_name.rfind(kObstaclePrefix, 0) != 0) {
+			continue;
+		}
+
+		ObstacleGeometry geometry{};
+		geometry.radius = kDefaultObstacleRadius;
+		geometry.height = kDefaultObstacleHeight;
+		geometry.margin = kDefaultObstacleMargin;
+
+		bool geometry_found = false;
+
+		for (sdf::ElementPtr link = model->GetElement("link"); link && !geometry_found; link = link->GetNextElement("link")) {
+			for (sdf::ElementPtr collision = link->GetElement("collision"); collision && !geometry_found;
+			     collision = collision->GetNextElement("collision")) {
+				if (!collision->HasElement("geometry")) {
+					continue;
+				}
+
+				const sdf::ElementPtr shape = collision->GetElement("geometry");
+
+				if (shape->HasElement("box")) {
+					const gz::math::Vector3d size = shape->GetElement("box")->Get<gz::math::Vector3d>("size");
+					geometry.size_x = static_cast<float>(size.X());
+					geometry.size_y = static_cast<float>(size.Y());
+					geometry.size_z = static_cast<float>(size.Z());
+					geometry.radius = 0.5f * sqrtf(geometry.size_x * geometry.size_x + geometry.size_y * geometry.size_y);
+					geometry.height = geometry.size_z;
+					geometry_found = true;
+
+				} else if (shape->HasElement("cylinder")) {
+					const sdf::ElementPtr cylinder = shape->GetElement("cylinder");
+					const float radius = cylinder->Get<float>("radius");
+					const float length = cylinder->Get<float>("length");
+					geometry.size_x = 2.f * radius;
+					geometry.size_y = 2.f * radius;
+					geometry.size_z = length;
+					geometry.radius = radius;
+					geometry.height = length;
+					geometry_found = true;
+
+				} else if (shape->HasElement("sphere")) {
+					const float radius = shape->GetElement("sphere")->Get<float>("radius");
+					geometry.size_x = 2.f * radius;
+					geometry.size_y = 2.f * radius;
+					geometry.size_z = 2.f * radius;
+					geometry.radius = radius;
+					geometry.height = 2.f * radius;
+					geometry_found = true;
+				}
+			}
+		}
+
+		if (!geometry_found) {
+			PX4_WARN("using default obstacle geometry for %s", model_name.c_str());
+		}
+
+		_obstacle_geometry[model_name] = geometry;
+	}
+
+	return !_obstacle_geometry.empty();
+}
+
 GZBridge::GZBridge(const std::string &world, const std::string &model_name) :
 	ModuleParams(nullptr),
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::rate_ctrl),
@@ -88,6 +181,8 @@ int GZBridge::init()
 	if (!subscribeMag(true)) {
 		return PX4_ERROR;
 	}
+
+	loadObstacleGeometry();
 
 	// OPTIONAL:
 	if (_sim_gz_en_gps.get()) {
@@ -500,8 +595,6 @@ void GZBridge::poseInfoCallback(const gz::msgs::Pose_V &msg)
 {
 	const uint64_t timestamp = hrt_absolute_time();
 	static constexpr const char *kObstaclePrefix = "obstacle_";
-	// The mpc_obstacles world uses box obstacles of size 1x1x30 [m].
-	// For circular horizontal avoidance bounds, use half-diagonal of 1x1: sqrt(0.5^2 + 0.5^2) ~= 0.71 m.
 	static constexpr float kDefaultObstacleRadius = 0.71f;
 	static constexpr float kDefaultObstacleHeight = 30.f;
 	static constexpr float kDefaultObstacleMargin = 1.f;
@@ -518,14 +611,32 @@ void GZBridge::poseInfoCallback(const gz::msgs::Pose_V &msg)
 		    && (name.rfind(kObstaclePrefix, 0) == 0)) {
 			const gz::msgs::Vector3d &obstacle_position = pose.position();
 			const uint8_t index = obstacles.count;
+			ObstacleGeometry geometry{};
+
+			const auto it = _obstacle_geometry.find(name);
+
+			if (it != _obstacle_geometry.end()) {
+				geometry = it->second;
+
+			} else {
+				geometry.radius = kDefaultObstacleRadius;
+				geometry.height = kDefaultObstacleHeight;
+				geometry.margin = kDefaultObstacleMargin;
+				geometry.size_x = NAN;
+				geometry.size_y = NAN;
+				geometry.size_z = NAN;
+			}
 
 			// Position conversion: Gazebo ENU to PX4 NED.
 			obstacles.x[index] = obstacle_position.y();   // North
 			obstacles.y[index] = obstacle_position.x();   // East
 			obstacles.z[index] = -obstacle_position.z();  // Down
-			obstacles.radius[index] = kDefaultObstacleRadius;
-			obstacles.height[index] = kDefaultObstacleHeight;
-			obstacles.margin[index] = kDefaultObstacleMargin;
+			obstacles.size_x[index] = geometry.size_x;
+			obstacles.size_y[index] = geometry.size_y;
+			obstacles.size_z[index] = geometry.size_z;
+			obstacles.radius[index] = geometry.radius;
+			obstacles.height[index] = geometry.height;
+			obstacles.margin[index] = geometry.margin;
 			obstacles.count++;
 		}
 

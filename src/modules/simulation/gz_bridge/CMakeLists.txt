@@ -39,6 +39,7 @@ endif()
 
 if (gz-transport_FOUND)
 	px4_add_git_submodule(TARGET git_gz PATH "${PX4_SOURCE_DIR}/Tools/simulation/gz")
+	find_package(sdformat14 REQUIRED)
 
 	file(GLOB gz_worlds ${PX4_SOURCE_DIR}/Tools/simulation/gz/worlds/*.sdf)
 	file(GLOB gz_airframes ${PX4_SOURCE_DIR}/ROMFS/px4fmu_common/init.d-posix/airframes/*_gz_*)
@@ -71,13 +72,16 @@ if (gz-transport_FOUND)
 			module.yaml
 	)
 
-    target_include_directories(modules__simulation__gz_bridge
+	target_include_directories(modules__simulation__gz_bridge
         PUBLIC
             ${PX4_GZ_MSGS_BINARY_DIR}
+			${SDFormat_INCLUDE_DIRS}
     )
 
 	target_include_directories(modules__simulation__gz_bridge PUBLIC px4_gz_msgs)
 	target_link_libraries(modules__simulation__gz_bridge PUBLIC px4_gz_msgs)
+	target_link_libraries(modules__simulation__gz_bridge PUBLIC ${SDFormat_LIBRARIES})
+	target_compile_definitions(modules__simulation__gz_bridge PRIVATE PX4_GZ_WORLDS_DIR="${PX4_SOURCE_DIR}/Tools/simulation/gz/worlds")
 
 	include(ExternalProject)
 	ExternalProject_Add(gz
