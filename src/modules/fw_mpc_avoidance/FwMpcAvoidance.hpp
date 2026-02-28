@@ -42,12 +42,14 @@ private:
 	void Run() override;
 	void parameters_update();
 	void step_internal_model(float dt);
+	float thrust_to_direct_throttle(float thrust_cmd_N) const;
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance) const;
 	bool build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
-						float yaw, float pitch_now, float nearest_distance, float trigger_distance,
-						hrt_abstime now, fixed_wing_lateral_setpoint_s &lat_sp,
+						float yaw, float pitch_now, float nearest_distance, float trigger_distance, hrt_abstime now,
+						const fixed_wing_longitudinal_setpoint_s *nominal_lon_sp,
+						fixed_wing_lateral_setpoint_s &lat_sp,
 						fixed_wing_longitudinal_setpoint_s &lon_sp) const;
 	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
 			       bool emergency_turn_active, float nearest_distance, float trigger_distance, float vehicle_speed,
@@ -62,6 +64,7 @@ private:
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
+	uORB::Subscription _fw_nominal_lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
@@ -90,6 +93,8 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
 		(ParamBool<px4::params::FW_MPC_EMERG_EN>) _param_fw_mpc_emerg_en,
+		(ParamBool<px4::params::FW_MPC_THR_EN>) _param_fw_mpc_thr_en,
+		(ParamInt<px4::params::FW_MPC_HORIZON>) _param_fw_mpc_horizon,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
 		(ParamFloat<px4::params::FW_MPC_FAIL_HOLD>) _param_fw_mpc_fail_hold,
 		(ParamFloat<px4::params::FW_MPC_ACT_HYS>) _param_fw_mpc_act_hys,

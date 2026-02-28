@@ -26,6 +26,33 @@ PARAM_DEFINE_INT32(FW_MPC_AVOID_EN, 0);
 PARAM_DEFINE_INT32(FW_MPC_EMERG_EN, 0);
 
 /**
+ * Enable direct throttle override from MPC.
+ *
+ * When disabled, fw_mpc_avoidance leaves throttle control to TECS and publishes
+ * only direct pitch. When enabled, the module also publishes throttle_direct
+ * from the MPC thrust command.
+ *
+ * @value 0 TECS throttle
+ * @value 1 MPC direct throttle
+ * @min 0
+ * @max 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_INT32(FW_MPC_THR_EN, 0);
+
+/**
+ * Active MPC prediction horizon length.
+ *
+ * This sets the number of prediction steps used by the MPC QP at runtime.
+ * The compile-time solver/storage limit remains fixed in the controller.
+ *
+ * @min 2
+ * @max 48
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_INT32(FW_MPC_HORIZON, 48);
+
+/**
  * Internal MPC model integration step [s].
  *
  * Sets the integration step used by the internal SIH-like model during rollouts.
@@ -145,7 +172,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 8.0f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 10.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 3.0f);
 
 /**
  * Obstacle proximity cost weight.

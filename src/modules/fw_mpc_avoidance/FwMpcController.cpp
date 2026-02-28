@@ -220,11 +220,13 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 	x_next = fd_step(x_now, u_apply);
 
 	// Shift horizon
-	for (int k = 0; k < _N - 1; k++) {
-		_ubar.col(k) = _ubar.col(k + 1);
-	}
+	if (_N > 1) {
+		for (int k = 0; k < _N - 1; k++) {
+			_ubar.col(k) = _ubar.col(k + 1);
+		}
 
-	_ubar.col(_N - 1) = _ubar.col(_N - 2);
+		_ubar.col(_N - 1) = _ubar.col(_N - 2);
+	}
 
 	_xbar.col(0) = x_next;
 

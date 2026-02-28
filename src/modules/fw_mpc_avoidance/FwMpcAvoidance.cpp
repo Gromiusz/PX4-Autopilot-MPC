@@ -30,7 +30,8 @@ FwMpcAvoidance::FwMpcAvoidance() :
 
 bool FwMpcAvoidance::init()
 {
-	_controller.configure(_param_fw_mpc_avoid_dt.get(), FwMpcController::kMaxHorizon);
+	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
+	_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon);
 	const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
 	_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
 	_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
@@ -53,7 +54,9 @@ void FwMpcAvoidance::parameters_update()
 		_param_update_sub.copy(&p);
 		updateParams();
 
-		if (_controller.configure(_param_fw_mpc_avoid_dt.get(), FwMpcController::kMaxHorizon)) {
+		const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
+
+		if (_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon)) {
 			_mpc_ready = false;
 
 		} else {
@@ -87,6 +90,19 @@ void FwMpcAvoidance::step_internal_model(const float dt)
 	Vector3f wind_B{wind.windspeed_north, wind.windspeed_east, 0.0f};
 	// In absence of MPC solution, use zero moments and zero thrust; this keeps state integration bounded.
 	_dynamics.propagate(Vector3f{}, Vector3f{}, wind_B, dt);
+}
+
+float FwMpcAvoidance::thrust_to_direct_throttle(float thrust_cmd_N) const
+{
+	const float thrust_min = _controller.limits().u_min(3);
+	const float thrust_max = _controller.limits().u_max(3);
+
+	if (!PX4_ISFINITE(thrust_cmd_N) || thrust_max <= thrust_min + 1e-3f) {
+		return math::constrain(_param_fw_thr_min.get(), 0.f, 1.f);
+	}
+
+	const float throttle_norm = (thrust_cmd_N - thrust_min) / (thrust_max - thrust_min);
+	return math::constrain(throttle_norm, math::constrain(_param_fw_thr_min.get(), 0.f, 1.f), 1.f);
 }
 
 bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
@@ -140,8 +156,8 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 }
 
 bool FwMpcAvoidance::build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos,
-		const matrix::Vector3f &vel_ned, float yaw, float pitch_now, float nearest_distance,
-		float trigger_distance, hrt_abstime now, fixed_wing_lateral_setpoint_s &lat_sp,
+		const matrix::Vector3f &vel_ned, float yaw, float pitch_now, float nearest_distance, float trigger_distance,
+		hrt_abstime now, const fixed_wing_longitudinal_setpoint_s *nominal_lon_sp, fixed_wing_lateral_setpoint_s &lat_sp,
 		fixed_wing_longitudinal_setpoint_s &lon_sp) const
 {
 	if (_obstacle_count <= 0) {
@@ -219,26 +235,37 @@ bool FwMpcAvoidance::build_emergency_avoidance_setpoint(const vehicle_local_posi
 	float pitch_cmd = PX4_ISFINITE(pitch_now) ? pitch_now : math::radians(2.f);
 	pitch_cmd = math::constrain(pitch_cmd, pitch_min_rad, pitch_max_rad);
 
-	const float throttle_min = math::constrain(_param_fw_thr_min.get(), 0.f, 1.f);
-	float throttle_cmd = math::max(throttle_min, 0.35f);
-
-	if (_have_last_valid_mpc_setpoint && PX4_ISFINITE(_last_valid_lon_sp.throttle_direct)) {
-		throttle_cmd = math::max(throttle_cmd, _last_valid_lon_sp.throttle_direct);
-	}
-
-	throttle_cmd = math::constrain(throttle_cmd, throttle_min, 1.f);
-
 	lat_sp.timestamp = now;
 	lat_sp.course = NAN;
 	lat_sp.airspeed_direction = NAN;
 	lat_sp.lateral_acceleration = lateral_accel_cmd;
 
+	if (nominal_lon_sp != nullptr) {
+		lon_sp.altitude = nominal_lon_sp->altitude;
+		lon_sp.height_rate = nominal_lon_sp->height_rate;
+		lon_sp.equivalent_airspeed = nominal_lon_sp->equivalent_airspeed;
+
+	} else {
+		lon_sp.altitude = NAN;
+		lon_sp.height_rate = NAN;
+		lon_sp.equivalent_airspeed = NAN;
+	}
+
 	lon_sp.timestamp = now;
-	lon_sp.altitude = NAN;
-	lon_sp.height_rate = NAN;
-	lon_sp.equivalent_airspeed = NAN;
 	lon_sp.pitch_direct = pitch_cmd;
-	lon_sp.throttle_direct = throttle_cmd;
+
+	if (_param_fw_mpc_thr_en.get()) {
+		float throttle_cmd = math::max(math::constrain(_param_fw_thr_min.get(), 0.f, 1.f), 0.35f);
+
+		if (_have_last_valid_mpc_setpoint && PX4_ISFINITE(_last_valid_lon_sp.throttle_direct)) {
+			throttle_cmd = math::max(throttle_cmd, _last_valid_lon_sp.throttle_direct);
+		}
+
+		lon_sp.throttle_direct = math::constrain(throttle_cmd, 0.f, 1.f);
+
+	} else {
+		lon_sp.throttle_direct = NAN; // TECS throttle authority
+	}
 
 	return true;
 }
@@ -347,11 +374,13 @@ void FwMpcAvoidance::Run()
 
 	fixed_wing_lateral_setpoint_s lat_sp{};
 	fixed_wing_longitudinal_setpoint_s lon_sp{};
+	fixed_wing_longitudinal_setpoint_s nominal_lon_sp{};
 	vehicle_local_position_setpoint_s lpos_sp{};
 
 	bool have_lat = false;
 	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
+	const bool have_nominal_lon = _fw_nominal_lon_sp_sub.copy(&nominal_lon_sp);
 	float nearest_obstacle_distance = NAN;
 	float trigger_distance = NAN;
 	float vehicle_speed = NAN;
@@ -466,9 +495,6 @@ void FwMpcAvoidance::Run()
 				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
 				const float phi_cmd = math::constrain(x_pred(6), -roll_lim_rad, roll_lim_rad);
 				const float theta_cmd = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
-				const float throttle_min = math::constrain(_param_fw_thr_min.get(), 0.f, 1.f);
-				float throttle_norm = u_cmd(3) / math::max(_controller.limits().u_max(3), 0.1f);
-				throttle_norm = PX4_ISFINITE(throttle_norm) ? math::constrain(throttle_norm, throttle_min, 1.f) : throttle_min;
 				float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd);
 				lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
 
@@ -477,12 +503,20 @@ void FwMpcAvoidance::Run()
 				lat_sp.airspeed_direction = NAN;
 				lat_sp.lateral_acceleration = lateral_accel_cmd;
 
+				if (have_nominal_lon) {
+					lon_sp.altitude = nominal_lon_sp.altitude;
+					lon_sp.height_rate = nominal_lon_sp.height_rate;
+					lon_sp.equivalent_airspeed = nominal_lon_sp.equivalent_airspeed;
+
+				} else {
+					lon_sp.altitude = NAN;
+					lon_sp.height_rate = NAN;
+					lon_sp.equivalent_airspeed = NAN;
+				}
+
 				lon_sp.timestamp = now;
-				lon_sp.altitude = NAN;
-				lon_sp.height_rate = NAN;
-				lon_sp.equivalent_airspeed = NAN;
 				lon_sp.pitch_direct = theta_cmd;
-				lon_sp.throttle_direct = throttle_norm;
+				lon_sp.throttle_direct = _param_fw_mpc_thr_en.get() ? thrust_to_direct_throttle(u_cmd(3)) : NAN;
 				have_lat = true;
 				have_lon = true;
 				_last_valid_lat_sp = lat_sp;
@@ -498,7 +532,8 @@ void FwMpcAvoidance::Run()
 
 				if (_param_fw_mpc_emerg_en.get() && obstacle_data_fresh && obstacle_triggered) {
 					have_emergency_setpoint = build_emergency_avoidance_setpoint(lpos, vel_N, euler.psi(), euler.theta(),
-								      nearest_obstacle_distance, trigger_distance, now, lat_sp, lon_sp);
+								      nearest_obstacle_distance, trigger_distance, now,
+								      have_nominal_lon ? &nominal_lon_sp : nullptr, lat_sp, lon_sp);
 				}
 
 				if (have_emergency_setpoint) {
