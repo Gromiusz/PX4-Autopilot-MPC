@@ -724,6 +724,26 @@ void GZBridge::poseInfoCallback(const gz::msgs::Pose_V &msg)
 		}
 	}
 
+	if (obstacles.count > 0 && !_obstacle_reported) {
+		PX4_INFO("fw_mpc_obstacles: count=%u frame=%u", obstacles.count, obstacles.frame);
+
+		for (uint8_t i = 0; i < obstacles.count; i++) {
+			PX4_INFO("obs%u N=%.2f E=%.2f D=%.2f size=(%.2f,%.2f,%.2f) r=%.2f h=%.2f m=%.2f",
+				 i + 1,
+				 (double)obstacles.x[i],
+				 (double)obstacles.y[i],
+				 (double)obstacles.z[i],
+				 (double)obstacles.size_x[i],
+				 (double)obstacles.size_y[i],
+				 (double)obstacles.size_z[i],
+				 (double)obstacles.radius[i],
+				 (double)obstacles.height[i],
+				 (double)obstacles.margin[i]);
+		}
+
+		_obstacle_reported = true;
+	}
+
 	_fw_mpc_obstacles_pub.publish(obstacles);
 }
 

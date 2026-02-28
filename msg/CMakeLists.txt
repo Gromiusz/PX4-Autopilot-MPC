@@ -141,6 +141,7 @@ set(msg_files
 	MessageFormatResponse.msg
 	Mission.msg
 	MissionResult.msg
+	MissionSetpointPosition.msg
 	MpcStatus.msg
 	MountOrientation.msg
 	NavigatorMissionItem.msg
@@ -148,6 +149,7 @@ set(msg_files
 	NeuralControl.msg
 	NormalizedUnsignedSetpoint.msg
 	ObstacleDistance.msg
+	ObstaclePosition.msg
 	OffboardControlMode.msg
 	OnboardComputerStatus.msg
 	OpenDroneIdArmStatus.msg

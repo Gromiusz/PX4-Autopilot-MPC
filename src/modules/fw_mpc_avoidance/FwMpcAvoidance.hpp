@@ -3,6 +3,7 @@
 #include "FwMpcDynamics.hpp"
 #include "FwMpcController.hpp"
 
+#include <dataman_client/DatamanClient.hpp>
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
@@ -12,7 +13,11 @@
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fw_mpc_obstacles.h>
+#include <uORB/topics/home_position.h>
+#include <uORB/topics/mission.h>
+#include <uORB/topics/mission_setpoint_position.h>
 #include <uORB/topics/mpc_status.h>
+#include <uORB/topics/obstacle_position.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
@@ -43,6 +48,11 @@ private:
 	void parameters_update();
 	void step_internal_model(float dt);
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
+	void maybe_log_waypoint_setpoint(const vehicle_local_position_setpoint_s &lpos_sp);
+	void publish_obstacle_position();
+	void publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
+					      const mission_s *mission,
+					      const home_position_s *home_pos);
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance) const;
@@ -63,7 +73,9 @@ private:
 	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
+	uORB::Subscription _home_pos_sub{ORB_ID(home_position)};
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
+	uORB::Subscription _mission_sub{ORB_ID(mission)};
 	uORB::Subscription _fw_nominal_lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
 
@@ -71,11 +83,14 @@ private:
 
 	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(mpc_lateral_setpoint)};
 	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(mpc_longitudinal_setpoint)};
+	uORB::Publication<obstacle_position_s> _obstacle_position_pub{ORB_ID(obstacle_position)};
+	uORB::Publication<mission_setpoint_position_s> _mission_setpoint_position_pub{ORB_ID(mission_setpoint_position)};
 	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
 	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
+	DatamanClient _dataman_client{};
 	bool _mpc_ready{false};
 	bool _mpc_active_last{false};
 	hrt_abstime _time_obstacle_last_update{0};
@@ -85,10 +100,22 @@ private:
 	int _obstacle_count{0};
 	bool _have_last_valid_mpc_setpoint{false};
 	bool _have_last_model_prediction{false};
+	bool _have_logged_waypoint_setpoint{false};
+	bool _have_last_obstacle_position_publish{false};
+	bool _have_last_mission_setpoint_position_publish{false};
+	bool _have_latest_obstacles_msg{false};
+	bool _have_last_mission_ref_state{false};
+	bool _last_mission_ref_valid{false};
 	FwMpcController::StateVec _last_model_prediction{};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
 	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};
+	vehicle_local_position_setpoint_s _last_logged_waypoint_setpoint{};
+	fw_mpc_obstacles_s _latest_obstacles_msg{};
+	obstacle_position_s _last_obstacle_position_msg{};
+	mission_setpoint_position_s _last_mission_setpoint_position_msg{};
+	uint64_t _last_mission_ref_timestamp{0};
+	uint32_t _last_home_update_count{0};
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,

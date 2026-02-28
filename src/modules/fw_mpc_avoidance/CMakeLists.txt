@@ -10,6 +10,7 @@ px4_add_module(
 		FwMpcController.cpp
 		FwMpcController.hpp
 	DEPENDS
+		dataman_client
 		px4_work_queue
 		osqp
 	)

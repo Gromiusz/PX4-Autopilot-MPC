@@ -6,9 +6,11 @@
 
 #include "FwMpcAvoidance.hpp"
 
+#include <modules/navigator/navigation.h>
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/log.h>
 #include <drivers/drv_hrt.h>
+#include <lib/geo/geo.h>
 #include <lib/mathlib/mathlib.h>
 
 #include <cmath>
@@ -103,6 +105,212 @@ float FwMpcAvoidance::thrust_to_direct_throttle(float thrust_cmd_N) const
 
 	const float throttle_norm = (thrust_cmd_N - thrust_min) / (thrust_max - thrust_min);
 	return math::constrain(throttle_norm, math::constrain(_param_fw_thr_min.get(), 0.f, 1.f), 1.f);
+}
+
+void FwMpcAvoidance::publish_obstacle_position()
+{
+	obstacle_position_s msg{};
+	msg.timestamp = hrt_absolute_time();
+	msg.obstacle_count = 0;
+
+	if (_have_latest_obstacles_msg
+	    && (_latest_obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_NED
+		|| _latest_obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU)) {
+		const uint8_t count = math::min(_latest_obstacles_msg.count, obstacle_position_s::MAX_OBSTACLES);
+		msg.obstacle_count = count;
+
+		for (uint8_t i = 0; i < count; i++) {
+			if (_latest_obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU) {
+				msg.obstacle_north[i] = _latest_obstacles_msg.y[i];
+				msg.obstacle_east[i] = _latest_obstacles_msg.x[i];
+				msg.obstacle_down[i] = -_latest_obstacles_msg.z[i];
+
+			} else {
+				msg.obstacle_north[i] = _latest_obstacles_msg.x[i];
+				msg.obstacle_east[i] = _latest_obstacles_msg.y[i];
+				msg.obstacle_down[i] = _latest_obstacles_msg.z[i];
+			}
+
+			msg.obstacle_size_x[i] = _latest_obstacles_msg.size_x[i];
+			msg.obstacle_size_y[i] = _latest_obstacles_msg.size_y[i];
+			msg.obstacle_size_z[i] = _latest_obstacles_msg.size_z[i];
+			msg.obstacle_radius[i] = _latest_obstacles_msg.radius[i];
+			msg.obstacle_height[i] = _latest_obstacles_msg.height[i];
+			msg.obstacle_margin[i] = _latest_obstacles_msg.margin[i];
+		}
+	}
+
+	auto equal_or_both_nan = [](float a, float b) {
+		return (PX4_ISFINITE(a) && PX4_ISFINITE(b) && fabsf(a - b) < 1e-4f)
+		       || (!PX4_ISFINITE(a) && !PX4_ISFINITE(b));
+	};
+
+	bool changed = !_have_last_obstacle_position_publish
+		       || msg.obstacle_count != _last_obstacle_position_msg.obstacle_count;
+
+	for (uint8_t i = 0; i < obstacle_position_s::MAX_OBSTACLES && !changed; i++) {
+		changed = !equal_or_both_nan(msg.obstacle_north[i], _last_obstacle_position_msg.obstacle_north[i])
+			  || !equal_or_both_nan(msg.obstacle_east[i], _last_obstacle_position_msg.obstacle_east[i])
+			  || !equal_or_both_nan(msg.obstacle_down[i], _last_obstacle_position_msg.obstacle_down[i])
+			  || !equal_or_both_nan(msg.obstacle_size_x[i], _last_obstacle_position_msg.obstacle_size_x[i])
+			  || !equal_or_both_nan(msg.obstacle_size_y[i], _last_obstacle_position_msg.obstacle_size_y[i])
+			  || !equal_or_both_nan(msg.obstacle_size_z[i], _last_obstacle_position_msg.obstacle_size_z[i])
+			  || !equal_or_both_nan(msg.obstacle_radius[i], _last_obstacle_position_msg.obstacle_radius[i])
+			  || !equal_or_both_nan(msg.obstacle_height[i], _last_obstacle_position_msg.obstacle_height[i])
+			  || !equal_or_both_nan(msg.obstacle_margin[i], _last_obstacle_position_msg.obstacle_margin[i]);
+	}
+
+	if (!changed) {
+		return;
+	}
+
+	_obstacle_position_pub.publish(msg);
+	_last_obstacle_position_msg = msg;
+	_have_last_obstacle_position_publish = true;
+}
+
+void FwMpcAvoidance::publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
+		const mission_s *mission,
+		const home_position_s *home_pos)
+{
+	mission_setpoint_position_s msg{};
+	msg.timestamp = hrt_absolute_time();
+	msg.mission_id = mission != nullptr ? mission->mission_id : 0;
+	msg.current_seq = mission != nullptr ? mission->current_seq : -1;
+	msg.mission_item_count = mission != nullptr ? mission->count : 0;
+	msg.setpoint_count = 0;
+	msg.reference_valid = false;
+	msg.home_alt_valid = home_pos != nullptr && home_pos->valid_alt && PX4_ISFINITE(home_pos->alt);
+	msg.truncated = false;
+
+	for (uint16_t i = 0; i < mission_setpoint_position_s::MAX_SETPOINTS; i++) {
+		msg.sequence[i] = UINT16_MAX;
+		msg.north[i] = NAN;
+		msg.east[i] = NAN;
+		msg.down[i] = NAN;
+	}
+
+	const bool have_global_ref = lpos != nullptr
+				     && lpos->xy_global
+				     && lpos->z_global
+				     && PX4_ISFINITE(lpos->ref_lat)
+				     && PX4_ISFINITE(lpos->ref_lon)
+				     && PX4_ISFINITE(lpos->ref_alt);
+
+	if (!have_global_ref || mission == nullptr) {
+		msg.reference_valid = false;
+
+	} else {
+		msg.reference_valid = true;
+		MapProjection projection{lpos->ref_lat, lpos->ref_lon, lpos->ref_timestamp};
+		const dm_item_t mission_dataman_id = static_cast<dm_item_t>(mission->mission_dataman_id);
+
+		auto mission_item_contains_position = [](const mission_item_s &item) {
+			return item.nav_cmd == NAV_CMD_WAYPOINT
+			       || item.nav_cmd == NAV_CMD_LOITER_UNLIMITED
+			       || item.nav_cmd == NAV_CMD_LOITER_TIME_LIMIT
+			       || item.nav_cmd == NAV_CMD_LAND
+			       || item.nav_cmd == NAV_CMD_TAKEOFF
+			       || item.nav_cmd == NAV_CMD_LOITER_TO_ALT
+			       || item.nav_cmd == NAV_CMD_VTOL_TAKEOFF
+			       || item.nav_cmd == NAV_CMD_VTOL_LAND;
+		};
+
+		for (uint16_t i = 0; i < mission->count; i++) {
+			mission_item_s item{};
+
+			if (!_dataman_client.readSync(mission_dataman_id, i, reinterpret_cast<uint8_t *>(&item), sizeof(item))) {
+				continue;
+			}
+
+			if (!mission_item_contains_position(item)) {
+				continue;
+			}
+
+			if (!PX4_ISFINITE(item.lat) || !PX4_ISFINITE(item.lon)) {
+				continue;
+			}
+
+			float altitude_amsl = item.altitude;
+
+			if (item.altitude_is_relative) {
+				if (!msg.home_alt_valid) {
+					continue;
+				}
+
+				altitude_amsl += home_pos->alt;
+			}
+
+			if (!PX4_ISFINITE(altitude_amsl)) {
+				continue;
+			}
+
+			if (msg.setpoint_count >= mission_setpoint_position_s::MAX_SETPOINTS) {
+				msg.truncated = true;
+				break;
+			}
+
+			float north = NAN;
+			float east = NAN;
+			projection.project(item.lat, item.lon, north, east);
+			const float down = -(altitude_amsl - lpos->ref_alt);
+
+			const uint16_t index = msg.setpoint_count++;
+			msg.sequence[index] = i;
+			msg.north[index] = north;
+			msg.east[index] = east;
+			msg.down[index] = down;
+		}
+	}
+
+	auto equal_or_both_nan = [](float a, float b) {
+		return (PX4_ISFINITE(a) && PX4_ISFINITE(b) && fabsf(a - b) < 1e-4f)
+		       || (!PX4_ISFINITE(a) && !PX4_ISFINITE(b));
+	};
+
+	bool changed = !_have_last_mission_setpoint_position_publish
+		       || msg.mission_id != _last_mission_setpoint_position_msg.mission_id
+		       || msg.current_seq != _last_mission_setpoint_position_msg.current_seq
+		       || msg.mission_item_count != _last_mission_setpoint_position_msg.mission_item_count
+		       || msg.setpoint_count != _last_mission_setpoint_position_msg.setpoint_count
+		       || msg.reference_valid != _last_mission_setpoint_position_msg.reference_valid
+		       || msg.home_alt_valid != _last_mission_setpoint_position_msg.home_alt_valid
+		       || msg.truncated != _last_mission_setpoint_position_msg.truncated;
+
+	for (uint16_t i = 0; i < mission_setpoint_position_s::MAX_SETPOINTS && !changed; i++) {
+		changed = msg.sequence[i] != _last_mission_setpoint_position_msg.sequence[i]
+			  || !equal_or_both_nan(msg.north[i], _last_mission_setpoint_position_msg.north[i])
+			  || !equal_or_both_nan(msg.east[i], _last_mission_setpoint_position_msg.east[i])
+			  || !equal_or_both_nan(msg.down[i], _last_mission_setpoint_position_msg.down[i]);
+	}
+
+	if (!changed) {
+		return;
+	}
+
+	_mission_setpoint_position_pub.publish(msg);
+	_last_mission_setpoint_position_msg = msg;
+	_have_last_mission_setpoint_position_publish = true;
+}
+
+void FwMpcAvoidance::maybe_log_waypoint_setpoint(const vehicle_local_position_setpoint_s &lpos_sp)
+{
+	if (!PX4_ISFINITE(lpos_sp.x) || !PX4_ISFINITE(lpos_sp.y) || !PX4_ISFINITE(lpos_sp.z)) {
+		return;
+	}
+
+	const bool changed = !_have_logged_waypoint_setpoint
+			     || fabsf(lpos_sp.x - _last_logged_waypoint_setpoint.x) > 0.5f
+			     || fabsf(lpos_sp.y - _last_logged_waypoint_setpoint.y) > 0.5f
+			     || fabsf(lpos_sp.z - _last_logged_waypoint_setpoint.z) > 0.5f;
+
+	if (!changed) {
+		return;
+	}
+
+	PX4_INFO("waypoint N=%.2f E=%.2f D=%.2f", (double)lpos_sp.x, (double)lpos_sp.y, (double)lpos_sp.z);
+	_last_logged_waypoint_setpoint = lpos_sp;
+	_have_logged_waypoint_setpoint = true;
 }
 
 bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
@@ -319,8 +527,13 @@ void FwMpcAvoidance::Run()
 	parameters_update();
 
 	fw_mpc_obstacles_s obstacles_msg{};
+	bool obstacle_publish_requested = false;
 
 	if (_fw_mpc_obstacles_sub.update(&obstacles_msg)) {
+		_latest_obstacles_msg = obstacles_msg;
+		_have_latest_obstacles_msg = true;
+		obstacle_publish_requested = true;
+
 		if (obstacles_msg.count == 0) {
 			_controller.clear_obstacles();
 			_obstacle_count = 0;
@@ -376,10 +589,52 @@ void FwMpcAvoidance::Run()
 	fixed_wing_longitudinal_setpoint_s lon_sp{};
 	fixed_wing_longitudinal_setpoint_s nominal_lon_sp{};
 	vehicle_local_position_setpoint_s lpos_sp{};
+	vehicle_local_position_s lpos_for_debug{};
+	mission_s mission_msg{};
+	home_position_s home_pos{};
 
 	bool have_lat = false;
 	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
+	const bool mission_updated = _mission_sub.updated();
+	const bool have_mission = _mission_sub.copy(&mission_msg);
+	const bool have_lpos_for_debug = _lpos_sub.copy(&lpos_for_debug);
+	const bool have_home_pos = _home_pos_sub.copy(&home_pos);
+	bool mission_publish_requested = mission_updated || !_have_last_mission_setpoint_position_publish;
+
+	if (have_goal) {
+		maybe_log_waypoint_setpoint(lpos_sp);
+	}
+
+	if (have_lpos_for_debug) {
+		const bool mission_ref_valid = lpos_for_debug.xy_global && lpos_for_debug.z_global;
+
+		if (!_have_last_mission_ref_state
+		    || mission_ref_valid != _last_mission_ref_valid
+		    || lpos_for_debug.ref_timestamp != _last_mission_ref_timestamp) {
+			mission_publish_requested = true;
+		}
+	}
+
+	if (have_home_pos
+	    && (!_have_last_mission_ref_state || home_pos.update_count != _last_home_update_count)) {
+		mission_publish_requested = true;
+	}
+
+	if (obstacle_publish_requested) {
+		publish_obstacle_position();
+	}
+
+	if (mission_publish_requested) {
+		publish_mission_setpoint_position(have_lpos_for_debug ? &lpos_for_debug : nullptr,
+						 have_mission ? &mission_msg : nullptr,
+						 have_home_pos ? &home_pos : nullptr);
+		_have_last_mission_ref_state = true;
+		_last_mission_ref_valid = have_lpos_for_debug && lpos_for_debug.xy_global && lpos_for_debug.z_global;
+		_last_mission_ref_timestamp = have_lpos_for_debug ? lpos_for_debug.ref_timestamp : 0;
+		_last_home_update_count = have_home_pos ? home_pos.update_count : 0;
+	}
+
 	const bool have_nominal_lon = _fw_nominal_lon_sp_sub.copy(&nominal_lon_sp);
 	float nearest_obstacle_distance = NAN;
 	float trigger_distance = NAN;

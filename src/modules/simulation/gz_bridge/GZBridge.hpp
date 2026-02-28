@@ -193,6 +193,7 @@ private:
 
 	std::unordered_map<std::string, ObstacleGeometry> _obstacle_geometry{};
 	bool _obstacle_geometry_loaded{false};
+	bool _obstacle_reported{false};
 
 	bool _realtime_clock_set{false};
 	gz::transport::Node _node;
