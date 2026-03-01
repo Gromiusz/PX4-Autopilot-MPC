@@ -335,10 +335,11 @@ void FwMpcAvoidance::maybe_log_waypoint_setpoint(const vehicle_local_position_se
 }
 
 bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
-		float &nearest_distance, float &trigger_distance) const
+		float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const
 {
 	nearest_distance = NAN;
 	trigger_distance = NAN;
+	nearest_obstacle_index = -1;
 
 	const hrt_abstime obstacle_timeout_us =
 		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
@@ -355,33 +356,40 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	const float bias = math::max(_param_fw_mpc_obs_bias.get(), 0.f);
 	trigger_distance = math::max(dmin, speed * lookahead_s + bias);
 	nearest_distance = INFINITY;
+	bool obstacle_triggered = false;
 
 	for (int i = 0; i < _obstacle_count; i++) {
 		const FwMpcController::Obstacle &obs = _obstacles[i];
 		const float Rbuf = obs.R + obs.margin + obs.planning_margin;
 		const Vector2f obs_xy{obs.c(0), obs.c(1)};
 		const float horizontal_distance_to_surface = (obs_xy - pos_xy).norm() - Rbuf;
+		float obstacle_distance = horizontal_distance_to_surface;
 
 		if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
 			const float half_height_buffered = 0.5f * obs.height + obs.margin;
 			const float vertical_distance_to_surface = fabsf(pos_z_up - obs.c(2)) - half_height_buffered;
-			nearest_distance = math::min(nearest_distance, math::max(horizontal_distance_to_surface, vertical_distance_to_surface));
+			obstacle_distance = math::max(horizontal_distance_to_surface, vertical_distance_to_surface);
 
 			// Finite-height obstacle only applies in its vertical span.
 			if (vertical_distance_to_surface > 0.f) {
+				if (!PX4_ISFINITE(nearest_distance) || obstacle_distance < nearest_distance) {
+					nearest_distance = obstacle_distance;
+					nearest_obstacle_index = i;
+				}
+
 				continue;
 			}
-
-		} else {
-			nearest_distance = math::min(nearest_distance, horizontal_distance_to_surface);
 		}
 
-		if (horizontal_distance_to_surface < trigger_distance) {
-			return true;
+		if (!PX4_ISFINITE(nearest_distance) || obstacle_distance < nearest_distance) {
+			nearest_distance = obstacle_distance;
+			nearest_obstacle_index = i;
 		}
+
+		obstacle_triggered |= horizontal_distance_to_surface < trigger_distance;
 	}
 
-	return false;
+	return obstacle_triggered;
 }
 
 bool FwMpcAvoidance::build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos,
@@ -500,10 +508,12 @@ bool FwMpcAvoidance::build_emergency_avoidance_setpoint(const vehicle_local_posi
 }
 
 void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh,
-					bool obstacle_triggered, bool emergency_turn_active, float nearest_distance,
+					bool obstacle_triggered, bool emergency_turn_active, int nearest_obstacle_index, float nearest_distance,
 					float trigger_distance, float vehicle_speed, int qp_status, float model_pred_pos_error,
 					float model_pred_vel_error, float model_pred_att_error, float model_pred_age_s,
-					bool solve_success, float objective_value, int qp_iterations, float qp_solve_time_us)
+					bool solve_success, int qp_status_polish, float objective_value, float qp_primal_residual,
+					float qp_dual_residual, float qp_active_slack_max, float qp_active_slack_sum,
+					int qp_iterations, float qp_solve_time_us)
 {
 	mpc_status_s status{};
 	status.timestamp = hrt_absolute_time();
@@ -513,6 +523,7 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.obstacle_triggered = obstacle_triggered;
 	status.emergency_turn_active = emergency_turn_active;
 	status.obstacle_count = math::max(_obstacle_count, 0);
+	status.nearest_obstacle_index = nearest_obstacle_index;
 	status.nearest_obstacle_distance = nearest_distance;
 	status.trigger_distance = trigger_distance;
 	status.vehicle_speed = vehicle_speed;
@@ -521,7 +532,12 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.model_pred_att_error = model_pred_att_error;
 	status.model_pred_age_s = model_pred_age_s;
 	status.solve_success = solve_success;
+	status.qp_status_polish = qp_status_polish;
 	status.objective_value = objective_value;
+	status.qp_primal_residual = qp_primal_residual;
+	status.qp_dual_residual = qp_dual_residual;
+	status.qp_active_slack_max = qp_active_slack_max;
+	status.qp_active_slack_sum = qp_active_slack_sum;
 	status.qp_iterations = qp_iterations;
 	status.qp_solve_time_us = qp_solve_time_us;
 	status.last_qp_status = qp_status;
@@ -659,6 +675,7 @@ void FwMpcAvoidance::Run()
 	const bool have_nominal_lon = _fw_nominal_lon_sp_sub.copy(&nominal_lon_sp);
 	float nearest_obstacle_distance = NAN;
 	float trigger_distance = NAN;
+	int nearest_obstacle_index = -1;
 	float vehicle_speed = NAN;
 	float model_pred_pos_error = NAN;
 	float model_pred_vel_error = NAN;
@@ -686,7 +703,7 @@ void FwMpcAvoidance::Run()
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 		vehicle_speed = vel_N.norm();
 		const bool trigger_now = have_state && have_goal
-				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance);
+				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance, nearest_obstacle_index);
 		obstacle_triggered = trigger_now;
 
 		if (trigger_now) {
@@ -850,10 +867,12 @@ void FwMpcAvoidance::Run()
 	_mpc_active_last = mpc_active_now;
 	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
 	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, emergency_turn_active,
-			   nearest_obstacle_distance,
+			   nearest_obstacle_index, nearest_obstacle_distance,
 			   trigger_distance, vehicle_speed, _controller.last_qp_status(), model_pred_pos_error,
 			   model_pred_vel_error, model_pred_att_error, model_pred_age_s, qp_debug.solve_success,
-			   qp_debug.objective_value, qp_debug.iterations, qp_debug.solve_time_us);
+			   qp_debug.status_polish, qp_debug.objective_value, qp_debug.primal_residual,
+			   qp_debug.dual_residual, qp_debug.active_slack_max, qp_debug.active_slack_sum,
+			   qp_debug.iterations, qp_debug.solve_time_us);
 
 	if (have_lat) {
 		_lat_sp_pub.publish(lat_sp);

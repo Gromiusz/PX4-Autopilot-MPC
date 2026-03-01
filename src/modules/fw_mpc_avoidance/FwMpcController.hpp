@@ -69,7 +69,12 @@ public:
 	struct QpDebug {
 		bool solve_success{false};
 		float objective_value{0.f};
+		float primal_residual{0.f};
+		float dual_residual{0.f};
+		float active_slack_max{0.f};
+		float active_slack_sum{0.f};
 		int iterations{0};
+		int status_polish{0};
 		float solve_time_us{0.f};
 	};
 

@@ -583,6 +583,13 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints)
 {
 	_last_qp_debug = {};
+	_last_qp_debug.objective_value = NAN;
+	_last_qp_debug.primal_residual = NAN;
+	_last_qp_debug.dual_residual = NAN;
+	_last_qp_debug.active_slack_max = NAN;
+	_last_qp_debug.active_slack_sum = NAN;
+	_last_qp_debug.solve_time_us = NAN;
+	_last_qp_debug.status_polish = 0;
 
 	// Symmetrize H
 	for (int i = 0; i < n_vars; i++) {
@@ -654,7 +661,10 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 	if (solver && solver->info) {
 		_last_qp_status = solver->info->status_val;
 		_last_qp_debug.objective_value = static_cast<float>(solver->info->obj_val);
+		_last_qp_debug.primal_residual = static_cast<float>(solver->info->prim_res);
+		_last_qp_debug.dual_residual = static_cast<float>(solver->info->dual_res);
 		_last_qp_debug.iterations = solver->info->iter;
+		_last_qp_debug.status_polish = solver->info->status_polish;
 		_last_qp_debug.solve_time_us = static_cast<float>(solver->info->solve_time * 1e6);
 
 		ok = (solver->info->status_val == OSQP_SOLVED)
@@ -665,6 +675,23 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 	}
 
 	_last_qp_debug.solve_success = ok;
+
+	const int idx_slack0 = _N * (kStateSize + kControlSize);
+	const int n_slack = math::max(n_vars - idx_slack0, 0);
+
+	if (n_slack > 0 && solver && solver->solution && solver->solution->x) {
+		float slack_max = 0.f;
+		float slack_sum = 0.f;
+
+		for (int i = 0; i < n_slack; i++) {
+			const float slack = math::max(static_cast<float>(solver->solution->x[idx_slack0 + i]), 0.f);
+			slack_max = math::max(slack_max, slack);
+			slack_sum += slack;
+		}
+
+		_last_qp_debug.active_slack_max = slack_max;
+		_last_qp_debug.active_slack_sum = slack_sum;
+	}
 
 	if (ok && solver && solver->solution && solver->solution->x) {
 		for (int i = 0; i < n_vars; i++) {

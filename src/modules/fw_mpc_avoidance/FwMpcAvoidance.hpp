@@ -55,16 +55,18 @@ private:
 					      const home_position_s *home_pos);
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
-				 float &nearest_distance, float &trigger_distance) const;
+				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
 	bool build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 						float yaw, float pitch_now, float nearest_distance, float trigger_distance, hrt_abstime now,
 						const fixed_wing_longitudinal_setpoint_s *nominal_lon_sp,
 						fixed_wing_lateral_setpoint_s &lat_sp,
 						fixed_wing_longitudinal_setpoint_s &lon_sp) const;
 	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
-			       bool emergency_turn_active, float nearest_distance, float trigger_distance, float vehicle_speed,
+			       bool emergency_turn_active, int nearest_obstacle_index, float nearest_distance, float trigger_distance, float vehicle_speed,
 			       int qp_status, float model_pred_pos_error, float model_pred_vel_error, float model_pred_att_error,
-			       float model_pred_age_s, bool solve_success, float objective_value, int qp_iterations,
+			       float model_pred_age_s, bool solve_success, int qp_status_polish, float objective_value,
+			       float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
+			       float qp_active_slack_sum, int qp_iterations,
 			       float qp_solve_time_us);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
