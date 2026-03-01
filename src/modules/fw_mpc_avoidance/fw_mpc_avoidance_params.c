@@ -199,3 +199,42 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_CW, 3.0f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 12.0f);
+
+/**
+ * Minimum waypoint tracking weight scale during strong avoidance.
+ *
+ * As obstacle urgency rises, the stage tracking cost is reduced down to this scale.
+ * Lower values let the optimizer prioritize obstacle avoidance over direct mission tracking.
+ *
+ * @min 0.05
+ * @max 1.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.25f);
+
+/**
+ * Minimum terminal waypoint tracking scale during strong avoidance.
+ *
+ * As obstacle urgency rises anywhere in the horizon, the terminal waypoint cost is reduced
+ * down to this scale to avoid fighting the avoidance maneuver.
+ *
+ * @min 0.02
+ * @max 1.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.10f);
+
+/**
+ * Minimum control penalty scale during strong avoidance.
+ *
+ * As obstacle urgency rises, control smoothness and absolute control penalties are reduced
+ * down to this scale, allowing stronger steering action near obstacles.
+ *
+ * @min 0.05
+ * @max 1.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_AV_CTL, 0.35f);

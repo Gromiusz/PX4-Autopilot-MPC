@@ -41,6 +41,9 @@ public:
 		matrix::Vector4f Rrate_diag{0.08f, 0.12f, 0.08f, 0.05f};
 		float obstacle_proximity_weight{3.0f};
 		float obstacle_proximity_distance{12.0f}; // [m] from obstacle surface
+		float avoidance_tracking_scale_min{0.25f};
+		float avoidance_terminal_scale_min{0.10f};
+		float avoidance_control_scale_min{0.35f};
 		float obstacle_slack_linear{5000.f};
 		float obstacle_slack_quadratic{20000.f};
 	};
