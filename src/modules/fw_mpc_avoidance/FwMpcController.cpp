@@ -91,6 +91,9 @@ bool FwMpcController::configure(float Ts, int horizon)
 	_ubar.setZero();
 	_xbar.setZero();
 	_last_qp_status = 0;
+	_warm_start_z.setZero();
+	_warm_start_n_vars = 0;
+	_have_warm_start = false;
 	return true;
 }
 
@@ -932,6 +935,16 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 				      settings);
 
 	if (exitflag == 0) {
+		if (_have_warm_start && _warm_start_n_vars == n_vars) {
+			std::vector<OSQPFloat> x_warm(n_vars, 0.f);
+
+			for (int i = 0; i < n_vars; i++) {
+				x_warm[i] = static_cast<OSQPFloat>(_warm_start_z(i));
+			}
+
+			(void)osqp_warm_start(solver, x_warm.data(), nullptr);
+		}
+
 		exitflag = osqp_solve(solver);
 	}
 
@@ -976,6 +989,15 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 		for (int i = 0; i < n_vars; i++) {
 			z(i) = solver->solution->x[i];
 		}
+
+		_warm_start_z.setZero();
+
+		for (int i = 0; i < n_vars; i++) {
+			_warm_start_z(i) = z(i);
+		}
+
+		_warm_start_n_vars = n_vars;
+		_have_warm_start = true;
 
 	} else {
 		z.setZero();

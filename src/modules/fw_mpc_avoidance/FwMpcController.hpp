@@ -182,4 +182,7 @@ private:
 	matrix::Vector<float, kMaxConstraints> _u{};
 	int _last_qp_status{0};
 	QpDebug _last_qp_debug{};
+	matrix::Vector<float, kMaxVars> _warm_start_z{};
+	int _warm_start_n_vars{0};
+	bool _have_warm_start{false};
 };
