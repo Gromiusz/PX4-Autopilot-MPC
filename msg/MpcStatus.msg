@@ -17,8 +17,9 @@ float32 model_pred_att_error
 float32 model_pred_age_s
 
 bool solve_success
+int8 qp_tier_used
 int8 qp_status_polish
-uint8[2] padding1
+uint8 padding1
 float32 objective_value
 float32 qp_primal_residual
 float32 qp_dual_residual

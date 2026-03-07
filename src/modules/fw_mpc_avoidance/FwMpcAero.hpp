@@ -24,7 +24,7 @@ public:
 	 * Compute aerodynamic force/moment in body frame.
 	 * @param v_B body velocity [m/s] (FRD)
 	 * @param w_B body rates [rad/s]
-	 * @param altitude_m altitude above MSL [m] (used for air density)
+	 * @param altitude_m altitude above mean sea level [m] (used for air density)
 	 * @param u normalized control inputs [roll, pitch, yaw, thrust_N]
 	 * @param force_B aerodynamic force [N] in body frame
 	 * @param moment_B aerodynamic moment [Nm] in body frame

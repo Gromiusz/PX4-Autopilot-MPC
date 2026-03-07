@@ -22,7 +22,7 @@ public:
 	static constexpr int kMaxObstacles = 4;
 	// dx (N*n) + du (N*m) + obstacle slacks (N*max_obstacles)
 	static constexpr int kMaxVars = kMaxHorizon * (kStateSize + kControlSize + kMaxObstacles);
-	static constexpr int kMaxConstraints = 1200; // N*n eq + obstacle/rate/bounds
+	static constexpr int kMaxConstraints = 2400; // N*n eq + hard/soft obstacle + rate + bounds
 
 	using StateVec = FixedWingMpcModel::State;
 	using ControlVec = FixedWingMpcModel::Control;
@@ -71,6 +71,7 @@ public:
 
 	struct QpDebug {
 		bool solve_success{false};
+		int solve_tier_used{0};
 		float objective_value{0.f};
 		float primal_residual{0.f};
 		float dual_residual{0.f};
@@ -101,7 +102,7 @@ public:
 	 * @return true if QP solved, false if fallback zero solution used
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-		  ControlVec &u_apply, StateVec &x_next);
+		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);
 
 	int last_qp_status() const { return _last_qp_status; }
 	const QpDebug &last_qp_debug() const { return _last_qp_debug; }
@@ -115,6 +116,7 @@ public:
 
 	// Tune vehicle dynamics (shared with SIH parameters)
 	void set_vehicle_params(float mass, const matrix::Vector3f &inertia_diag, float kdv, float kdw);
+	void set_altitude_origin_amsl(float altitude_origin_amsl) { _model.set_altitude_origin_amsl(altitude_origin_amsl); }
 
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;
@@ -131,18 +133,22 @@ private:
 	float angDiff(float a, float b) const;
 
 	bool buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-		     const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
-		     const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
-		     const std::array<StateMat, kMaxHorizon> &Ak,
-		     const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
-		     int N, int &n_vars, int &n_constraints);
+			     const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+			     const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+			     const std::array<StateMat, kMaxHorizon> &Ak,
+			     const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
+			     int N, float obstacle_attention_distance, int &n_vars, int &n_constraints);
 	bool solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints);
+	Weights weights_for_solve_tier(const Weights &base_weights, int tier) const;
+	void computeActiveObstacles(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N,
+				    float obstacle_attention_distance, std::array<bool, kMaxObstacles> &active_obstacles) const;
 
 	void addObstacleConstraints(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-				    int N, int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
+					    const std::array<bool, kMaxObstacles> &active_obstacles,
+					    int N, int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
 	void addRateConstraints(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
 				int &row_offset, int Nz_dx, int Nz_du);
 	void addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,

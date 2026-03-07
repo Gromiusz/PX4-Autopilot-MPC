@@ -25,8 +25,8 @@ public:
 
 		matrix::Vector3f Fa_body{};
 		matrix::Vector3f Ma_body{};
-		const float altitude_up = math::max(x(11), 0.f); // controller stores z_up
-		_aero.compute(uvw, pqr, altitude_up, u, Fa_body, Ma_body);
+		const float altitude_amsl = math::max(_altitude_origin_amsl + x(11), 0.f);
+		_aero.compute(uvw, pqr, altitude_amsl, u, Fa_body, Ma_body);
 
 
 		const matrix::Dcmf R_nb = rotationMatrix(phi, theta, psi);
@@ -91,6 +91,7 @@ public:
 	const matrix::Matrix3f &inertia() const { return _I; }
 
 	void set_mass(float m) { _mass = math::max(m, 0.1f); }
+	void set_altitude_origin_amsl(float altitude_origin_amsl) { _altitude_origin_amsl = altitude_origin_amsl; }
 	void set_inertia_diag(const matrix::Vector3f &diag)
 	{
 		matrix::Vector3f d = diag.emult(matrix::Vector3f{1.f, 1.f, 1.f});
@@ -137,5 +138,6 @@ private:
 	const float _CL_alpha = 5.015f;
 	const float _CD0 = 0.029f;
 	const float _k = 1.f / (M_PI_F * 0.97f * 6.5f);
+	float _altitude_origin_amsl{0.f};
 	mutable FwMpcAero _aero{};
 };

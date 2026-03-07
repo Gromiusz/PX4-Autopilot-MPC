@@ -62,6 +62,8 @@ param set-default CA_SV_CS3_TYPE 4
 param set-default CA_SV_CS4_TYPE 9
 param set-default CA_SV_CS5_TYPE 10
 
+param set-default COM_RCL_EXCEPT 1
+
 param set-default SIH_MASS 1.0
 param set-default SIH_IXX 0.198
 param set-default SIH_IYY 0.146

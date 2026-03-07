@@ -48,7 +48,14 @@ private:
 	void parameters_update();
 	void step_internal_model(float dt);
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
-	void maybe_log_waypoint_setpoint(const vehicle_local_position_setpoint_s &lpos_sp);
+	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
+				     float pitch_min_rad, float pitch_max_rad) const;
+	void maybe_log_active_console_status(hrt_abstime now, bool mpc_active, int nearest_obstacle_index,
+					    float nearest_distance, float trigger_distance, float vehicle_speed,
+					    bool solve_success, int qp_tier_used, int qp_status,
+					    float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
+					    float model_pred_pos_error, float model_pred_vel_error,
+					    float model_pred_att_error, float model_pred_age_s);
 	void publish_obstacle_position();
 	void publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
 					      const mission_s *mission,
@@ -56,15 +63,10 @@ private:
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
-	bool build_emergency_avoidance_setpoint(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
-						float yaw, float pitch_now, float nearest_distance, float trigger_distance, hrt_abstime now,
-						const fixed_wing_longitudinal_setpoint_s *nominal_lon_sp,
-						fixed_wing_lateral_setpoint_s &lat_sp,
-						fixed_wing_longitudinal_setpoint_s &lon_sp) const;
 	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
 			       bool emergency_turn_active, int nearest_obstacle_index, float nearest_distance, float trigger_distance, float vehicle_speed,
 			       int qp_status, float model_pred_pos_error, float model_pred_vel_error, float model_pred_att_error,
-			       float model_pred_age_s, bool solve_success, int qp_status_polish, float objective_value,
+			       float model_pred_age_s, bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value,
 			       float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
 			       float qp_active_slack_sum, int qp_iterations,
 			       float qp_solve_time_us);
@@ -98,20 +100,24 @@ private:
 	hrt_abstime _time_last_obstacle_trigger{0};
 	hrt_abstime _time_last_valid_mpc_setpoint{0};
 	hrt_abstime _time_last_model_prediction{0};
+	hrt_abstime _time_last_active_console_log{0};
 	int _obstacle_count{0};
 	bool _have_last_valid_mpc_setpoint{false};
 	bool _have_last_model_prediction{false};
-	bool _have_logged_waypoint_setpoint{false};
 	bool _have_last_obstacle_position_publish{false};
 	bool _have_last_mission_setpoint_position_publish{false};
 	bool _have_latest_obstacles_msg{false};
 	bool _have_last_mission_ref_state{false};
 	bool _last_mission_ref_valid{false};
+	bool _have_last_active_console_state{false};
+	bool _last_console_active{false};
+	bool _last_console_solve_success{false};
+	int _last_console_qp_tier{-1};
+	int _last_console_qp_status{0};
 	FwMpcController::StateVec _last_model_prediction{};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
 	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};
-	vehicle_local_position_setpoint_s _last_logged_waypoint_setpoint{};
 	fw_mpc_obstacles_s _latest_obstacles_msg{};
 	obstacle_position_s _last_obstacle_position_msg{};
 	mission_setpoint_position_s _last_mission_setpoint_position_msg{};
@@ -122,7 +128,6 @@ private:
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
-		(ParamBool<px4::params::FW_MPC_EMERG_EN>) _param_fw_mpc_emerg_en,
 		(ParamBool<px4::params::FW_MPC_THR_EN>) _param_fw_mpc_thr_en,
 		(ParamInt<px4::params::FW_MPC_HORIZON>) _param_fw_mpc_horizon,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
@@ -133,15 +138,18 @@ private:
 		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
 		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
 		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,
+		(ParamFloat<px4::params::FW_MPC_OBS_TMAX>) _param_fw_mpc_obs_tmax,
 		(ParamFloat<px4::params::FW_MPC_OBS_PLAN>) _param_fw_mpc_obs_plan,
 		(ParamFloat<px4::params::FW_MPC_OBS_CW>) _param_fw_mpc_obs_cw,
 		(ParamFloat<px4::params::FW_MPC_OBS_CD>) _param_fw_mpc_obs_cd,
 		(ParamFloat<px4::params::FW_MPC_AV_TRK>) _param_fw_mpc_av_trk,
 		(ParamFloat<px4::params::FW_MPC_AV_TERM>) _param_fw_mpc_av_term,
 		(ParamFloat<px4::params::FW_MPC_AV_CTL>) _param_fw_mpc_av_ctl,
+		(ParamFloat<px4::params::FW_MPC_MIN_ALT>) _param_fw_mpc_min_alt,
 		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
 		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
 		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
 		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
 		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
 		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,

@@ -12,20 +12,6 @@
 PARAM_DEFINE_INT32(FW_MPC_AVOID_EN, 0);
 
 /**
- * Enable emergency fallback turn when MPC QP solve fails near obstacle.
- *
- * When enabled, the module can generate a direct avoidance turn setpoint if the QP
- * fails while obstacle-triggered mode is active.
- *
- * @value 0 Disabled
- * @value 1 Enabled
- * @min 0
- * @max 1
- * @group FW MPC Avoidance
- */
-PARAM_DEFINE_INT32(FW_MPC_EMERG_EN, 0);
-
-/**
  * Enable direct throttle override from MPC.
  *
  * When disabled, fw_mpc_avoidance leaves throttle control to TECS and publishes
@@ -91,7 +77,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_FAIL_HOLD, 1.20f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_ACT_HYS, 8.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_ACT_HYS, 2.0f);
 
 /**
  * Deactivation hold time after last trigger.
@@ -124,7 +110,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_TO, 0.50f);
  * Minimum activation distance to obstacle surface.
  *
  * MPC obstacle avoidance activates when distance to obstacle surface is below trigger distance.
- * Trigger distance is max(FW_MPC_OBS_DMIN, speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS).
+ * Trigger distance is min(FW_MPC_OBS_TMAX, max(FW_MPC_OBS_DMIN, speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS)).
  *
  * @unit m
  * @min 1.0
@@ -137,7 +123,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_DMIN, 25.0f);
 /**
  * Speed lookahead time for obstacle activation.
  *
- * Used in trigger distance formula: speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS.
+ * Used in trigger distance formula: min(FW_MPC_OBS_TMAX, max(FW_MPC_OBS_DMIN, speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS)).
  *
  * @unit s
  * @min 0.0
@@ -150,7 +136,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 4.0f);
 /**
  * Additional distance bias for obstacle activation.
  *
- * Used in trigger distance formula: speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS.
+ * Used in trigger distance formula: min(FW_MPC_OBS_TMAX, max(FW_MPC_OBS_DMIN, speed * FW_MPC_OBS_LKHD + FW_MPC_OBS_BIAS)).
  *
  * @unit m
  * @min 0.0
@@ -159,6 +145,20 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 4.0f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_OBS_BIAS, 8.0f);
+
+/**
+ * Maximum activation distance to obstacle surface.
+ *
+ * Caps the speed-based trigger distance, so distant obstacles do not activate MPC
+ * too early at high airspeed.
+ *
+ * @unit m
+ * @min 5.0
+ * @max 200.0
+ * @decimal 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_TMAX, 80.0f);
 
 /**
  * Additional horizontal planning margin for earlier turns.
@@ -185,7 +185,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_PLAN, 3.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_CW, 3.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_CW, 6.0f);
 
 /**
  * Obstacle proximity cost distance from obstacle surface.
@@ -198,7 +198,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_CW, 3.0f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 12.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 20.0f);
 
 /**
  * Minimum waypoint tracking weight scale during strong avoidance.
@@ -211,7 +211,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 12.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.25f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.10f);
 
 /**
  * Minimum terminal waypoint tracking scale during strong avoidance.
@@ -224,7 +224,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.25f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.10f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.05f);
 
 /**
  * Minimum control penalty scale during strong avoidance.
@@ -237,4 +237,18 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.10f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_CTL, 0.35f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_CTL, 0.25f);
+
+/**
+ * Minimum local altitude for aggressive MPC pitch authority.
+ *
+ * Below this local Up altitude (relative to the local origin), fw_mpc_avoidance
+ * limits nose-down direct pitch to reduce ground-impact risk during avoidance.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 200.0
+ * @decimal 1
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_MIN_ALT, 10.0f);
