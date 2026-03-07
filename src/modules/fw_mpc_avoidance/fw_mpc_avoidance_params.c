@@ -33,10 +33,10 @@ PARAM_DEFINE_INT32(FW_MPC_THR_EN, 0);
  * The compile-time solver/storage limit remains fixed in the controller.
  *
  * @min 2
- * @max 48
+ * @max 64
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_INT32(FW_MPC_HORIZON, 48);
+PARAM_DEFINE_INT32(FW_MPC_HORIZON, 64);
 
 /**
  * Internal MPC model integration step [s].
@@ -118,7 +118,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_TO, 0.50f);
  * @decimal 1
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_DMIN, 25.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_DMIN, 35.0f);
 
 /**
  * Speed lookahead time for obstacle activation.
@@ -131,7 +131,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_DMIN, 25.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 4.0f);
+PARAM_DEFINE_FLOAT(FW_MPC_OBS_LKHD, 5.0f);
 
 /**
  * Additional distance bias for obstacle activation.

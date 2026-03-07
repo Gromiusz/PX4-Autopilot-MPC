@@ -99,7 +99,7 @@ public:
 	 * @param is_last whether this is the final waypoint (not used yet)
 	 * @param u_apply control to apply (du integrated on top of nominal)
 	 * @param x_next nominal state after applying u_apply for Ts
-	 * @return true if QP solved, false if fallback zero solution used
+	 * @return true if a command is available (QP solved or fallback from previous trajectory)
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
 		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);

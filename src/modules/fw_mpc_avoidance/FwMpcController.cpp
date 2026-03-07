@@ -332,7 +332,11 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		last_attempt_slack_max = PX4_ISFINITE(_last_qp_debug.active_slack_max) ? _last_qp_debug.active_slack_max : 0.f;
 	}
 
-	if (!solved) {
+	// If QP failed, keep following the previously valid nominal trajectory.
+	// This allows the vehicle to continue moving while the next cycles retry MPC.
+	const bool use_fallback_trajectory = !solved;
+
+	if (use_fallback_trajectory) {
 		_ubar = base_ubar;
 	}
 
@@ -366,7 +370,7 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		_xbar.col(k + 1) = fd_step(xk, uk);
 	}
 
-	return solved;
+	return solved || use_fallback_trajectory;
 }
 
 FwMpcController::Weights FwMpcController::weights_for_solve_tier(const Weights &base_weights, int tier) const
