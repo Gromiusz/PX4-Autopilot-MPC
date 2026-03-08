@@ -99,7 +99,7 @@ public:
 	 * @param is_last whether this is the final waypoint (not used yet)
 	 * @param u_apply control to apply (du integrated on top of nominal)
 	 * @param x_next nominal state after applying u_apply for Ts
-	 * @return true if a command is available (QP solved or fallback from previous trajectory)
+	 * @return true if a command is available (fresh QP solve or fallback from the last successful trajectory)
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
 		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);
@@ -170,6 +170,8 @@ private:
 
 	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _xbar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _ubar{};
+	matrix::Matrix<float, kControlSize, kMaxHorizon> _fallback_ubar{};
+	bool _have_fallback_trajectory{false};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};

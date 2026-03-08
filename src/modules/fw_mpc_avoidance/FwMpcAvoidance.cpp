@@ -381,7 +381,7 @@ void FwMpcAvoidance::maybe_log_active_console_status(hrt_abstime now, bool mpc_a
 		return;
 	}
 
-	static constexpr hrt_abstime log_interval_us = 500000;
+	static constexpr hrt_abstime log_interval_us = 200000;
 	const bool due = (now - _time_last_active_console_log) >= log_interval_us;
 
 	if (!state_changed && !due) {
@@ -748,9 +748,11 @@ void FwMpcAvoidance::Run()
 			FwMpcController::ControlVec u_cmd{};
 			FwMpcController::StateVec x_pred{};
 			const float V_cruise = math::max(vel_N.norm(), 8.f);
+			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
+			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, u_cmd, x_pred);
+			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
 
-				const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
-				if (_controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, u_cmd, x_pred)) {
+			if (have_mpc_command) {
 				const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
 				const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
 				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
@@ -782,13 +784,16 @@ void FwMpcAvoidance::Run()
 				lon_sp.throttle_direct = _param_fw_mpc_thr_en.get() ? thrust_to_direct_throttle(u_cmd(3)) : NAN;
 				have_lat = true;
 				have_lon = true;
-				_last_valid_lat_sp = lat_sp;
-				_last_valid_lon_sp = lon_sp;
-				_time_last_valid_mpc_setpoint = now;
-				_have_last_valid_mpc_setpoint = true;
-				_last_model_prediction = x_pred;
-				_time_last_model_prediction = now;
-				_have_last_model_prediction = true;
+
+				if (step_qp_debug.solve_success) {
+					_last_valid_lat_sp = lat_sp;
+					_last_valid_lon_sp = lon_sp;
+					_time_last_valid_mpc_setpoint = now;
+					_have_last_valid_mpc_setpoint = true;
+					_last_model_prediction = x_pred;
+					_time_last_model_prediction = now;
+					_have_last_model_prediction = true;
+				}
 
 			} else {
 				const hrt_abstime hold_timeout_us =

@@ -90,10 +90,12 @@ bool FwMpcController::configure(float Ts, int horizon)
 	_N = horizon;
 	_ubar.setZero();
 	_xbar.setZero();
+	_fallback_ubar.setZero();
 	_last_qp_status = 0;
 	_warm_start_z.setZero();
 	_warm_start_n_vars = 0;
 	_have_warm_start = false;
+	_have_fallback_trajectory = false;
 	return true;
 }
 
@@ -159,6 +161,9 @@ FwMpcController::StateVec FwMpcController::initTrim(float V_trim, float z0_up, c
 		_xbar.col(k + 1) = fd_step(xk, uk);
 	}
 
+	_have_fallback_trajectory = false;
+	_fallback_ubar = _ubar;
+
 	return x0;
 }
 
@@ -182,7 +187,6 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		x_ref_seq(2, k) = goal_up(2);
 	}
 
-	const int nIt = (_options.mode == Mode::LMPC) ? 1 : 2;
 	const Weights base_weights = _weights;
 	const matrix::Matrix<float, kControlSize, kMaxHorizon> base_ubar = _ubar;
 	bool solved = false;
@@ -240,6 +244,19 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 	const bool real_hard_threat = PX4_ISFINITE(current_hard_distance)
 				      && current_hard_distance < math::max(0.5f * base_weights.obstacle_proximity_distance, 6.f);
 	const bool very_close_hard_threat = PX4_ISFINITE(current_hard_distance) && current_hard_distance < 4.f;
+	int nIt = (_options.mode == Mode::LMPC) ? 1 : 2;
+
+	if (real_soft_threat) {
+		nIt = math::max(nIt, (_options.mode == Mode::LMPC) ? 2 : 3);
+	}
+
+	if (real_hard_threat) {
+		nIt = math::max(nIt, 3);
+	}
+
+	if (very_close_hard_threat) {
+		nIt = math::max(nIt, 4);
+	}
 
 	for (int tier = 0; tier < 4; tier++) {
 		if (tier >= 2 && !real_soft_threat && last_attempt_slack_max < 0.05f) {
@@ -292,8 +309,8 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 			int n_vars = 0;
 			int n_constraints = 0;
 
-				if (buildQP(_xbar, _ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, Ak, Bk, _N, obstacle_attention_distance, n_vars,
-					    n_constraints)) {
+			if (buildQP(_xbar, _ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, Ak, Bk, _N,
+				    obstacle_attention_distance, n_vars, n_constraints)) {
 				tier_solved = solveQP(z, n_vars, n_constraints);
 
 			} else {
@@ -332,11 +349,13 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		last_attempt_slack_max = PX4_ISFINITE(_last_qp_debug.active_slack_max) ? _last_qp_debug.active_slack_max : 0.f;
 	}
 
-	// If QP failed, keep following the previously valid nominal trajectory.
-	// This allows the vehicle to continue moving while the next cycles retry MPC.
-	const bool use_fallback_trajectory = !solved;
+	const bool use_fallback_trajectory = !solved && _have_fallback_trajectory;
 
-	if (use_fallback_trajectory) {
+	if (!solved && use_fallback_trajectory) {
+		// Reuse the tail of the last successful plan instead of reusing a failed local update.
+		_ubar = _fallback_ubar;
+
+	} else if (!solved) {
 		_ubar = base_ubar;
 	}
 
@@ -368,6 +387,14 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		const StateVec xk = _xbar.col(k);
 		const ControlVec uk = _ubar.col(k);
 		_xbar.col(k + 1) = fd_step(xk, uk);
+	}
+
+	if (solved) {
+		_fallback_ubar = _ubar;
+		_have_fallback_trajectory = true;
+
+	} else if (use_fallback_trajectory) {
+		_fallback_ubar = _ubar;
 	}
 
 	return solved || use_fallback_trajectory;
