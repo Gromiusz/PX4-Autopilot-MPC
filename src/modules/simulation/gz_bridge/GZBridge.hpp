@@ -80,8 +80,11 @@
 #include <gz/msgs/laserscan.pb.h>
 #include <gz/msgs/stringmsg.pb.h>
 #include <gz/msgs/scene.pb.h>
+#include <sdf/sdf.hh>
 // Custom PX4 proto
 #include <opticalflow.pb.h>
+
+#include <unordered_map>
 
 using namespace time_literals;
 
@@ -132,6 +135,7 @@ private:
 	void laserScanCallback(const gz::msgs::LaserScan &msg);
 	void opticalFlowCallback(const px4::msgs::OpticalFlow &msg);
 	void magnetometerCallback(const gz::msgs::Magnetometer &msg);
+	bool loadObstacleGeometry();
 
 	static void rotateQuaternion(gz::math::Quaterniond &q_FRD_to_NED, const gz::math::Quaterniond q_FLU_to_ENU);
 
@@ -177,6 +181,19 @@ private:
 	const std::string _model_name;
 
 	float _temperature{288.15};  // 15 degrees
+
+	struct ObstacleGeometry {
+		float size_x{NAN};
+		float size_y{NAN};
+		float size_z{NAN};
+		float radius{0.71f};
+		float height{30.f};
+		float margin{1.f};
+	};
+
+	std::unordered_map<std::string, ObstacleGeometry> _obstacle_geometry{};
+	bool _obstacle_geometry_loaded{false};
+	bool _obstacle_reported{false};
 
 	bool _realtime_clock_set{false};
 	gz::transport::Node _node;

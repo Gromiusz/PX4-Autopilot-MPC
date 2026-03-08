@@ -11,6 +11,8 @@ PX4_SIM_MODEL=${PX4_SIM_MODEL:=advanced_plane}
 
 param set-default SIM_GZ_EN 1
 
+param set-default FW_MPC_AVOID_EN 1
+param set-default FW_MPC_AVOID_DT 0.05
 param set-default FW_LND_ANG 8
 
 param set-default FW_PR_FF 0.08
@@ -59,6 +61,8 @@ param set-default CA_SV_CS3_TRQ_Y 1
 param set-default CA_SV_CS3_TYPE 4
 param set-default CA_SV_CS4_TYPE 9
 param set-default CA_SV_CS5_TYPE 10
+
+param set-default COM_RCL_EXCEPT 1
 
 param set-default SIH_MASS 1.0
 param set-default SIH_IXX 0.198

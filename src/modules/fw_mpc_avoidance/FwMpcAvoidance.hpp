@@ -3,6 +3,7 @@
 #include "FwMpcDynamics.hpp"
 #include "FwMpcController.hpp"
 
+#include <dataman_client/DatamanClient.hpp>
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
@@ -12,9 +13,15 @@
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fw_mpc_obstacles.h>
+#include <uORB/topics/home_position.h>
+#include <uORB/topics/mission.h>
+#include <uORB/topics/mission_setpoint_position.h>
+#include <uORB/topics/mpc_status.h>
+#include <uORB/topics/obstacle_position.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
+#include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
@@ -40,30 +47,110 @@ private:
 	void Run() override;
 	void parameters_update();
 	void step_internal_model(float dt);
+	float thrust_to_direct_throttle(float thrust_cmd_N) const;
+	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
+				     float pitch_min_rad, float pitch_max_rad) const;
+	void maybe_log_active_console_status(hrt_abstime now, bool mpc_active, int nearest_obstacle_index,
+					    float nearest_distance, float trigger_distance, float vehicle_speed,
+					    bool solve_success, int qp_tier_used, int qp_status,
+					    float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
+					    float model_pred_pos_error, float model_pred_vel_error,
+					    float model_pred_att_error, float model_pred_age_s);
+	void publish_obstacle_position();
+	void publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
+					      const mission_s *mission,
+					      const home_position_s *home_pos);
+	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
+	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
+				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
+	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
+			       bool emergency_turn_active, int nearest_obstacle_index, float nearest_distance, float trigger_distance, float vehicle_speed,
+			       int qp_status, float model_pred_pos_error, float model_pred_vel_error, float model_pred_att_error,
+			       float model_pred_age_s, bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value,
+			       float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
+			       float qp_active_slack_sum, int qp_iterations,
+			       float qp_solve_time_us);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _rates_sub{ORB_ID(vehicle_angular_velocity)};
 	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
+	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
+	uORB::Subscription _home_pos_sub{ORB_ID(home_position)};
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
-	uORB::Subscription _lat_sp_sub{ORB_ID(fixed_wing_lateral_setpoint)};
-	uORB::Subscription _lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
+	uORB::Subscription _mission_sub{ORB_ID(mission)};
+	uORB::Subscription _fw_nominal_lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
 
-	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(fixed_wing_lateral_setpoint)};
-	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(fixed_wing_longitudinal_setpoint)};
+	uORB::PublicationData<fixed_wing_lateral_setpoint_s> _lat_sp_pub{ORB_ID(mpc_lateral_setpoint)};
+	uORB::PublicationData<fixed_wing_longitudinal_setpoint_s> _lon_sp_pub{ORB_ID(mpc_longitudinal_setpoint)};
+	uORB::Publication<obstacle_position_s> _obstacle_position_pub{ORB_ID(obstacle_position)};
+	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
 	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
+	DatamanClient _dataman_client{};
 	bool _mpc_ready{false};
+	bool _mpc_active_last{false};
+	hrt_abstime _time_obstacle_last_update{0};
+	hrt_abstime _time_last_obstacle_trigger{0};
+	hrt_abstime _time_last_valid_mpc_setpoint{0};
+	hrt_abstime _time_last_model_prediction{0};
+	hrt_abstime _time_last_active_console_log{0};
+	int _obstacle_count{0};
+	bool _have_last_valid_mpc_setpoint{false};
+	bool _have_last_model_prediction{false};
+	bool _have_last_obstacle_position_publish{false};
+	bool _have_last_mission_setpoint_position_publish{false};
+	bool _have_latest_obstacles_msg{false};
+	bool _have_last_mission_ref_state{false};
+	bool _last_mission_ref_valid{false};
+	bool _have_last_active_console_state{false};
+	bool _last_console_active{false};
+	bool _last_console_solve_success{false};
+	int _last_console_qp_tier{-1};
+	int _last_console_qp_status{0};
+	FwMpcController::StateVec _last_model_prediction{};
+	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
+	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
+	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};
+	fw_mpc_obstacles_s _latest_obstacles_msg{};
+	obstacle_position_s _last_obstacle_position_msg{};
+	mission_setpoint_position_s _last_mission_setpoint_position_msg{};
+	orb_advert_t _mission_setpoint_position_pub_handles[mission_setpoint_position_s::MAX_CHUNKS]{};
+	uint8_t _mission_setpoint_position_pub_count{0};
+	uint64_t _last_mission_ref_timestamp{0};
+	uint32_t _last_home_update_count{0};
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
+		(ParamBool<px4::params::FW_MPC_THR_EN>) _param_fw_mpc_thr_en,
+		(ParamInt<px4::params::FW_MPC_HORIZON>) _param_fw_mpc_horizon,
 		(ParamFloat<px4::params::FW_MPC_AVOID_DT>) _param_fw_mpc_avoid_dt,
+		(ParamFloat<px4::params::FW_MPC_FAIL_HOLD>) _param_fw_mpc_fail_hold,
+		(ParamFloat<px4::params::FW_MPC_ACT_HYS>) _param_fw_mpc_act_hys,
+		(ParamFloat<px4::params::FW_MPC_DEACT_T>) _param_fw_mpc_deact_t,
+		(ParamFloat<px4::params::FW_MPC_OBS_TO>) _param_fw_mpc_obs_timeout,
+		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
+		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
+		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,
+		(ParamFloat<px4::params::FW_MPC_OBS_TMAX>) _param_fw_mpc_obs_tmax,
+		(ParamFloat<px4::params::FW_MPC_OBS_PLAN>) _param_fw_mpc_obs_plan,
+		(ParamFloat<px4::params::FW_MPC_OBS_CW>) _param_fw_mpc_obs_cw,
+		(ParamFloat<px4::params::FW_MPC_OBS_CD>) _param_fw_mpc_obs_cd,
+		(ParamFloat<px4::params::FW_MPC_AV_TRK>) _param_fw_mpc_av_trk,
+		(ParamFloat<px4::params::FW_MPC_AV_TERM>) _param_fw_mpc_av_term,
+		(ParamFloat<px4::params::FW_MPC_AV_CTL>) _param_fw_mpc_av_ctl,
+		(ParamFloat<px4::params::FW_MPC_MIN_ALT>) _param_fw_mpc_min_alt,
+		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
+		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
+		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
+		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
 		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
 		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,
 		(ParamFloat<px4::params::SIH_IYY>) _param_sih_iyy,

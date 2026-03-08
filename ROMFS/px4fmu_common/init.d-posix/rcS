@@ -288,9 +288,9 @@ fi
 # Note: rc.vehicle_setup is the entry point for all vehicle type specific setup.
 . ${R}etc/init.d/rc.vehicle_setup
 
-if fw_mpc_avoidance status >/dev/null 2>&1
+if param compare -s FW_MPC_AVOID_EN 1
 then
-    fw_mpc_avoidance start
+	fw_mpc_avoidance start
 fi
 
 navigator start

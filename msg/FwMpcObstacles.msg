@@ -10,5 +10,9 @@ uint8 FRAME_LOCAL_ENU = 4
 float32[4] x
 float32[4] y
 float32[4] z
+float32[4] size_x
+float32[4] size_y
+float32[4] size_z
 float32[4] radius
+float32[4] height
 float32[4] margin

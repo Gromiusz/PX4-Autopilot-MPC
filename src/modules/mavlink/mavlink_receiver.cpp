@@ -2513,6 +2513,7 @@ MavlinkReceiver::handle_message_fw_mpc_obstacles(mavlink_message_t *msg)
 	memcpy(obstacles.y, obstacles_msg.y, sizeof(obstacles.y));
 	memcpy(obstacles.z, obstacles_msg.z, sizeof(obstacles.z));
 	memcpy(obstacles.radius, obstacles_msg.radius, sizeof(obstacles.radius));
+	memcpy(obstacles.height, obstacles_msg.height, sizeof(obstacles.height));
 	memcpy(obstacles.margin, obstacles_msg.margin, sizeof(obstacles.margin));
 
 	_fw_mpc_obstacles_pub.publish(obstacles);

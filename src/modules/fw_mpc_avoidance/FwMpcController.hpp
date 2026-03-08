@@ -18,10 +18,11 @@ class FwMpcController
 public:
 	static constexpr int kStateSize = FixedWingMpcModel::kStateSize;   // 12
 	static constexpr int kControlSize = FixedWingMpcModel::kControlSize; // 4
-	static constexpr int kMaxHorizon = 24;
-	static constexpr int kMaxVars = kMaxHorizon * (kStateSize + kControlSize); // dx (N*n) + du (N*m)
-	static constexpr int kMaxConstraints = 1200; // N*n eq + obstacle/rate/bounds
+	static constexpr int kMaxHorizon = 64;
 	static constexpr int kMaxObstacles = 4;
+	// dx (N*n) + du (N*m) + obstacle slacks (N*max_obstacles)
+	static constexpr int kMaxVars = kMaxHorizon * (kStateSize + kControlSize + kMaxObstacles);
+	static constexpr int kMaxConstraints = 2400; // N*n eq + hard/soft obstacle + rate + bounds
 
 	using StateVec = FixedWingMpcModel::State;
 	using ControlVec = FixedWingMpcModel::Control;
@@ -35,9 +36,16 @@ public:
 		matrix::Matrix3f Qp{matrix::diag(matrix::Vector3f{4.f, 4.f, 6.f})};
 		float Qterm{20.f};
 		matrix::Matrix3f Qang{matrix::diag(matrix::Vector3f{0.25f, 0.60f, 0.80f})};
-		matrix::SquareMatrix<float, kControlSize> Rdu{matrix::diag(matrix::Vector4f{1.f, 1.f, 1.f, 0.15f})};
+		matrix::SquareMatrix<float, kControlSize> Rdu{matrix::diag(matrix::Vector4f{0.35f, 0.45f, 0.35f, 0.12f})};
 		matrix::SquareMatrix<float, kControlSize> Ru_abs{matrix::diag(matrix::Vector4f{0.03f, 0.03f, 0.03f, 0.03f})};
-		matrix::Vector4f Rrate_diag{0.5f, 0.5f, 0.5f, 0.10f};
+		matrix::Vector4f Rrate_diag{0.08f, 0.12f, 0.08f, 0.05f};
+		float obstacle_proximity_weight{3.0f};
+		float obstacle_proximity_distance{12.0f}; // [m] from obstacle surface
+		float avoidance_tracking_scale_min{0.25f};
+		float avoidance_terminal_scale_min{0.10f};
+		float avoidance_control_scale_min{0.35f};
+		float obstacle_slack_linear{5000.f};
+		float obstacle_slack_quadratic{20000.f};
 	};
 
 	struct Limits {
@@ -56,7 +64,22 @@ public:
 	struct Obstacle {
 		matrix::Vector3f c{0.f, 0.f, 0.f};
 		float R{0.f};
+		float height{0.f}; // <= 0 means unbounded in Z
 		float margin{0.f};
+		float planning_margin{0.f};
+	};
+
+	struct QpDebug {
+		bool solve_success{false};
+		int solve_tier_used{0};
+		float objective_value{0.f};
+		float primal_residual{0.f};
+		float dual_residual{0.f};
+		float active_slack_max{0.f};
+		float active_slack_sum{0.f};
+		int iterations{0};
+		int status_polish{0};
+		float solve_time_us{0.f};
 	};
 
 	FwMpcController() = default;
@@ -76,12 +99,13 @@ public:
 	 * @param is_last whether this is the final waypoint (not used yet)
 	 * @param u_apply control to apply (du integrated on top of nominal)
 	 * @param x_next nominal state after applying u_apply for Ts
-	 * @return true if QP solved, false if fallback zero solution used
+	 * @return true if a command is available (fresh QP solve or fallback from the last successful trajectory)
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-		  ControlVec &u_apply, StateVec &x_next);
+		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);
 
 	int last_qp_status() const { return _last_qp_status; }
+	const QpDebug &last_qp_debug() const { return _last_qp_debug; }
 
 	Weights &weights() { return _weights; }
 	Limits &limits() { return _limits; }
@@ -92,6 +116,7 @@ public:
 
 	// Tune vehicle dynamics (shared with SIH parameters)
 	void set_vehicle_params(float mass, const matrix::Vector3f &inertia_diag, float kdv, float kdw);
+	void set_altitude_origin_amsl(float altitude_origin_amsl) { _model.set_altitude_origin_amsl(altitude_origin_amsl); }
 
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;
@@ -108,23 +133,26 @@ private:
 	float angDiff(float a, float b) const;
 
 	bool buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-		     const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
-		     const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
-		     const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
-		     const std::array<StateMat, kMaxHorizon> &Ak,
-		     const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
-		     int N, int &n_vars, int &n_constraints);
+			     const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+			     const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+			     const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+			     const std::array<StateMat, kMaxHorizon> &Ak,
+			     const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
+			     int N, float obstacle_attention_distance, int &n_vars, int &n_constraints);
 	bool solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints);
+	Weights weights_for_solve_tier(const Weights &base_weights, int tier) const;
+	void computeActiveObstacles(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N,
+				    float obstacle_attention_distance, std::array<bool, kMaxObstacles> &active_obstacles) const;
 
 	void addObstacleConstraints(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-				    const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
-				    int N, int &row_offset, int Nz_dx);
+					    const std::array<bool, kMaxObstacles> &active_obstacles,
+					    int N, int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
 	void addRateConstraints(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
 				int &row_offset, int Nz_dx, int Nz_du);
 	void addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
-		       int &row_offset, int Nz_dx, int Nz_du);
+		       int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
 
 	FixedWingMpcModel _model{};
 
@@ -142,6 +170,8 @@ private:
 
 	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _xbar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _ubar{};
+	matrix::Matrix<float, kControlSize, kMaxHorizon> _fallback_ubar{};
+	bool _have_fallback_trajectory{false};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};
@@ -153,4 +183,8 @@ private:
 	matrix::Vector<float, kMaxConstraints> _l{};
 	matrix::Vector<float, kMaxConstraints> _u{};
 	int _last_qp_status{0};
+	QpDebug _last_qp_debug{};
+	matrix::Vector<float, kMaxVars> _warm_start_z{};
+	int _warm_start_n_vars{0};
+	bool _have_warm_start{false};
 };

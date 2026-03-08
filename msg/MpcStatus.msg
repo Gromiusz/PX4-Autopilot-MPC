@@ -1,0 +1,31 @@
+uint64 timestamp
+
+bool mpc_allowed
+bool mpc_active
+bool obstacle_data_fresh
+bool obstacle_triggered
+bool emergency_turn_active
+uint8 obstacle_count
+int16 nearest_obstacle_index
+
+float32 nearest_obstacle_distance
+float32 trigger_distance
+float32 vehicle_speed
+float32 model_pred_pos_error
+float32 model_pred_vel_error
+float32 model_pred_att_error
+float32 model_pred_age_s
+
+bool solve_success
+int8 qp_tier_used
+int8 qp_status_polish
+uint8 padding1
+float32 objective_value
+float32 qp_primal_residual
+float32 qp_dual_residual
+float32 qp_active_slack_max
+float32 qp_active_slack_sum
+int32 qp_iterations
+float32 qp_solve_time_us
+
+int32 last_qp_status
