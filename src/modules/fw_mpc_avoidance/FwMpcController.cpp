@@ -292,7 +292,6 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 				const StateVec xk = _xbar.col(k);
 				const ControlVec uk = _ubar.col(k);
 				_xbar.col(k + 1) = fd_step(xk, uk);
-				// czy na pewno uzywany jest model z SIH
 			}
 
 			matrix::Vector<float, kMaxHorizon> theta_ref_seq{};

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "FwMpcDynamics.hpp"
 #include "FwMpcController.hpp"
 
 #include <dataman_client/DatamanClient.hpp>
@@ -25,11 +24,9 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
-#include <uORB/topics/wind.h>
 
 /**
  * Fixed-wing MPC avoidance prototype module.
- * Currently pass-through with an internal SIH-like dynamics model step for future rollouts.
  */
 class FwMpcAvoidance final : public ModuleBase<FwMpcAvoidance>, public ModuleParams, public px4::ScheduledWorkItem
 {
@@ -46,7 +43,6 @@ public:
 private:
 	void Run() override;
 	void parameters_update();
-	void step_internal_model(float dt);
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
 	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
 				     float pitch_min_rad, float pitch_max_rad) const;
@@ -75,7 +71,6 @@ private:
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _rates_sub{ORB_ID(vehicle_angular_velocity)};
-	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
 	uORB::Subscription _home_pos_sub{ORB_ID(home_position)};
@@ -92,7 +87,6 @@ private:
 	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
-	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
 	DatamanClient _dataman_client{};
 	bool _mpc_ready{false};

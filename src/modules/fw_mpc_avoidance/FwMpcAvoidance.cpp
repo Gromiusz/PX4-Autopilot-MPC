@@ -34,10 +34,6 @@ bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float cle
 }
 } // namespace
 
-const matrix::Vector3f FwMpcDynamics::_I_diag{0.02f, 0.02f, 0.04f};
-const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I = matrix::diag(FwMpcDynamics::_I_diag);
-const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I_inv = matrix::diag(matrix::Vector3f{1.f / 0.02f, 1.f / 0.02f, 1.f / 0.04f});
-
 FwMpcAvoidance::FwMpcAvoidance() :
 	ModuleParams(nullptr),
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
@@ -90,28 +86,6 @@ void FwMpcAvoidance::parameters_update()
 		_controller.weights().avoidance_terminal_scale_min = math::constrain(_param_fw_mpc_av_term.get(), 0.02f, 1.f);
 		_controller.weights().avoidance_control_scale_min = math::constrain(_param_fw_mpc_av_ctl.get(), 0.05f, 1.f);
 	}
-}
-
-void FwMpcAvoidance::step_internal_model(const float dt)
-{
-	vehicle_attitude_s att{};
-	vehicle_angular_velocity_s rates{};
-	vehicle_local_position_s lpos{};
-	wind_s wind{};
-
-	if (_att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos)) {
-		FwMpcDynamics::State s{};
-		s.q_nb = Quatf(att.q);
-		s.omega_B = Vector3f{rates.xyz[0], rates.xyz[1], rates.xyz[2]};
-		s.velocity_N = Vector3f{lpos.vx, lpos.vy, lpos.vz};
-		s.position_N = Vector3f{lpos.x, lpos.y, lpos.z};
-		_dynamics.reset(s);
-	}
-
-	_wind_sub.copy(&wind);
-	Vector3f wind_B{wind.windspeed_north, wind.windspeed_east, 0.0f};
-	// In absence of MPC solution, use zero moments and zero thrust; this keeps state integration bounded.
-	_dynamics.propagate(Vector3f{}, Vector3f{}, wind_B, dt);
 }
 
 float FwMpcAvoidance::thrust_to_direct_throttle(float thrust_cmd_N) const
@@ -841,11 +815,8 @@ void FwMpcAvoidance::Run()
 				}
 			}
 
-		} else if (have_state) {
-			// Fallback: integrate internal model to keep nominal state bounded.
-			step_internal_model(math::max(dt, _param_fw_mpc_avoid_dt.get()));
+			}
 		}
-	}
 
 	if (!mpc_active_now) {
 		_have_last_model_prediction = false;

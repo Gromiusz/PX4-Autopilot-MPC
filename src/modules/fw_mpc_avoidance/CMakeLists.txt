@@ -4,7 +4,6 @@ px4_add_module(
 	SRCS
 		FwMpcAvoidance.cpp
 		FwMpcAvoidance.hpp
-		FwMpcDynamics.hpp
 		FixedWingMpcModel.hpp
 		FwMpcAero.hpp
 		FwMpcController.cpp
