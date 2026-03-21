@@ -60,6 +60,7 @@ private:
 	void publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
 					      const mission_s *mission,
 					      const home_position_s *home_pos);
+	bool sample_model_prediction(float pred_age_s, float model_dt_s, FwMpcController::StateVec &x_pred) const;
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
@@ -114,7 +115,8 @@ private:
 	bool _last_console_solve_success{false};
 	int _last_console_qp_tier{-1};
 	int _last_console_qp_status{0};
-	FwMpcController::StateVec _last_model_prediction{};
+	int _last_model_prediction_horizon_steps{0};
+	matrix::Matrix<float, FwMpcController::kStateSize, FwMpcController::kMaxHorizon + 1> _last_model_prediction_horizon{};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
 	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};

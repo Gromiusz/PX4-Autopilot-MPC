@@ -91,6 +91,9 @@ bool FwMpcController::configure(float Ts, int horizon)
 	_ubar.setZero();
 	_xbar.setZero();
 	_fallback_ubar.setZero();
+	_fallback_xapply.setZero();
+	_last_solved_xbar.setZero();
+	_time_since_last_solve_s = 0.f;
 	_last_qp_status = 0;
 	_warm_start_z.setZero();
 	_warm_start_n_vars = 0;
@@ -163,6 +166,9 @@ FwMpcController::StateVec FwMpcController::initTrim(float V_trim, float z0_up, c
 
 	_have_fallback_trajectory = false;
 	_fallback_ubar = _ubar;
+	_fallback_xapply.setZero();
+	_last_solved_xbar = _xbar;
+	_time_since_last_solve_s = 0.f;
 
 	return x0;
 }
@@ -175,9 +181,17 @@ void FwMpcController::set_vehicle_params(float mass, const matrix::Vector3f &ine
 }
 
 bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-			   float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next)
+			   float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next)
 {
 	(void)is_last; // currently unused
+	const float dt_step_s = math::constrain(dt_real_s, 0.f, 0.5f);
+
+	if (_have_fallback_trajectory) {
+		_time_since_last_solve_s += dt_step_s;
+
+	} else {
+		_time_since_last_solve_s = 0.f;
+	}
 
 	matrix::Matrix<float, 3, kMaxHorizon> x_ref_seq{};
 
@@ -278,6 +292,7 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 				const StateVec xk = _xbar.col(k);
 				const ControlVec uk = _ubar.col(k);
 				_xbar.col(k + 1) = fd_step(xk, uk);
+				// czy na pewno uzywany jest model z SIH
 			}
 
 			matrix::Vector<float, kMaxHorizon> theta_ref_seq{};
@@ -364,13 +379,42 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		_last_qp_debug.solve_tier_used = solved_tier;
 	}
 
-	u_apply = _ubar.col(0);
+	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> selected_xbar{};
+	matrix::Matrix<float, kControlSize, kMaxHorizon> solved_ubar{};
+	ControlVec u_selected{};
+
+	if (solved) {
+		rolloutStateHorizon(x_now, _ubar, selected_xbar);
+		solved_ubar = _ubar;
+		_last_solved_xbar = selected_xbar;
+		x_next = selected_xbar.col(1);
+		u_selected = _ubar.col(0);
+
+	} else if (use_fallback_trajectory) {
+		const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
+		const int control_idx = math::constrain(static_cast<int>(floorf(fallback_age_s / math::max(_Ts, 1e-3f))),
+						       0, _N - 1);
+		const float lookahead_age_s = math::min(fallback_age_s + _Ts, static_cast<float>(_N) * _Ts);
+
+		for (int i = 0; i < kControlSize; i++) {
+			u_selected(i) = _fallback_ubar(i, control_idx);
+		}
+
+		if (!sampleStateHorizon(_last_solved_xbar, lookahead_age_s, x_next)) {
+			x_next = fd_step(x_now, u_selected);
+		}
+
+	} else {
+		rolloutStateHorizon(x_now, _ubar, selected_xbar);
+		x_next = selected_xbar.col(1);
+		u_selected = _ubar.col(0);
+	}
+
+	u_apply = u_selected;
 
 	for (int i = 0; i < kControlSize; i++) {
 		u_apply(i) = math::constrain(u_apply(i), _limits.u_min(i), _limits.u_max(i));
 	}
-
-	x_next = fd_step(x_now, u_apply);
 
 	// Shift horizon
 	if (_N > 1) {
@@ -381,23 +425,78 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		_ubar.col(_N - 1) = _ubar.col(_N - 2);
 	}
 
-	_xbar.col(0) = x_next;
-
-	for (int k = 0; k < _N; k++) {
-		const StateVec xk = _xbar.col(k);
-		const ControlVec uk = _ubar.col(k);
-		_xbar.col(k + 1) = fd_step(xk, uk);
-	}
+	rolloutStateHorizon(x_next, _ubar, _xbar);
 
 	if (solved) {
-		_fallback_ubar = _ubar;
+		_fallback_ubar = solved_ubar;
+		rolloutAppliedStateSequence(x_now, _fallback_ubar, _fallback_xapply);
 		_have_fallback_trajectory = true;
-
-	} else if (use_fallback_trajectory) {
-		_fallback_ubar = _ubar;
+		_time_since_last_solve_s = 0.f;
 	}
 
 	return solved || use_fallback_trajectory;
+}
+
+void FwMpcController::rolloutStateHorizon(const StateVec &x0,
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+		matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar) const
+{
+	xbar.col(0) = x0;
+
+	for (int k = 0; k < _N; k++) {
+		const StateVec xk = xbar.col(k);
+		ControlVec uk{};
+
+		for (int i = 0; i < kControlSize; i++) {
+			uk(i) = ubar(i, k);
+		}
+
+		xbar.col(k + 1) = fd_step(xk, uk);
+	}
+}
+
+void FwMpcController::rolloutAppliedStateSequence(const StateVec &x0,
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+		matrix::Matrix<float, kStateSize, kMaxHorizon> &xapply) const
+{
+	StateVec xk = x0;
+
+	for (int k = 0; k < _N; k++) {
+		ControlVec uk{};
+
+		for (int i = 0; i < kControlSize; i++) {
+			uk(i) = ubar(i, k);
+		}
+
+		xk = fd_step(xk, uk);
+		xapply.col(k) = xk;
+	}
+}
+
+bool FwMpcController::sampleStateHorizon(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+		float age_s, StateVec &x_sampled) const
+{
+	if (_N < 1 || _Ts <= 1e-3f) {
+		return false;
+	}
+
+	const float clamped_age_s = math::constrain(age_s, 0.f, static_cast<float>(_N) * _Ts);
+	const float step_pos = clamped_age_s / _Ts;
+	const int idx0 = math::constrain(static_cast<int>(floorf(step_pos)), 0, _N);
+	const int idx1 = math::min(idx0 + 1, _N);
+	const float alpha = math::constrain(step_pos - static_cast<float>(idx0), 0.f, 1.f);
+	const StateVec x0 = xbar.col(idx0);
+	const StateVec x1 = xbar.col(idx1);
+
+	for (int i = 0; i < kStateSize; i++) {
+		x_sampled(i) = x0(i) + alpha * (x1(i) - x0(i));
+	}
+
+	for (int i = 6; i <= 8; i++) {
+		x_sampled(i) = matrix::wrap_pi(x0(i) + alpha * matrix::wrap_pi(x1(i) - x0(i)));
+	}
+
+	return true;
 }
 
 FwMpcController::Weights FwMpcController::weights_for_solve_tier(const Weights &base_weights, int tier) const

@@ -154,6 +154,37 @@ float FwMpcAvoidance::constrain_pitch_safety(float pitch_cmd, float vehicle_spee
 	return math::constrain(pitch_cmd, safe_pitch_min, safe_pitch_max);
 }
 
+bool FwMpcAvoidance::sample_model_prediction(float pred_age_s, float model_dt_s,
+		FwMpcController::StateVec &x_pred) const
+{
+	if (!_have_last_model_prediction || _last_model_prediction_horizon_steps < 1 || model_dt_s <= 1e-3f) {
+		return false;
+	}
+
+	const float max_age_s = (_last_model_prediction_horizon_steps + 0.5f) * model_dt_s;
+
+	if (pred_age_s < 0.5f * model_dt_s || pred_age_s > max_age_s) {
+		return false;
+	}
+
+	const float step_pos = math::constrain(pred_age_s / model_dt_s, 0.f, static_cast<float>(_last_model_prediction_horizon_steps));
+	const int idx0 = math::constrain(static_cast<int>(floorf(step_pos)), 0, _last_model_prediction_horizon_steps);
+	const int idx1 = math::min(idx0 + 1, _last_model_prediction_horizon_steps);
+	const float alpha = math::constrain(step_pos - static_cast<float>(idx0), 0.f, 1.f);
+	const FwMpcController::StateVec x0 = _last_model_prediction_horizon.col(idx0);
+	const FwMpcController::StateVec x1 = _last_model_prediction_horizon.col(idx1);
+
+	for (int i = 0; i < FwMpcController::kStateSize; i++) {
+		x_pred(i) = x0(i) + alpha * (x1(i) - x0(i));
+	}
+
+	for (int i = 6; i <= 8; i++) {
+		x_pred(i) = matrix::wrap_pi(x0(i) + alpha * matrix::wrap_pi(x1(i) - x0(i)));
+	}
+
+	return true;
+}
+
 void FwMpcAvoidance::publish_obstacle_position()
 {
 	obstacle_position_s msg{};
@@ -670,11 +701,8 @@ void FwMpcAvoidance::Run()
 		obstacle_triggered = trigger_now;
 
 		if (trigger_now) {
-			_time_last_obstacle_trigger = now;
-		}
-
-		if (trigger_now) {
 			mpc_active_now = true;
+			_time_last_obstacle_trigger = now;
 
 		} else if (_mpc_active_last && obstacle_data_fresh && have_state && have_goal) {
 			const float exit_hysteresis = math::max(_param_fw_mpc_act_hys.get(), 0.f);
@@ -690,6 +718,7 @@ void FwMpcAvoidance::Run()
 			_mpc_ready = false;
 			_have_last_valid_mpc_setpoint = false;
 			_have_last_model_prediction = false;
+			_last_model_prediction_horizon_steps = 0;
 		}
 
 		if (mpc_active_now && have_state && have_goal) {
@@ -719,21 +748,22 @@ void FwMpcAvoidance::Run()
 			if (_have_last_model_prediction) {
 				const float pred_age_s = (now - _time_last_model_prediction) * 1e-6f;
 				const float model_dt_s = math::max(_param_fw_mpc_avoid_dt.get(), 1e-3f);
+				FwMpcController::StateVec x_pred_ref{};
 
-				if (pred_age_s >= 0.5f * model_dt_s && pred_age_s <= 2.f * model_dt_s) {
+				if (sample_model_prediction(pred_age_s, model_dt_s, x_pred_ref)) {
 					model_pred_age_s = pred_age_s;
 
 					const Vector3f pos_now{x_now(9), x_now(10), x_now(11)};
-					const Vector3f pos_pred{_last_model_prediction(9), _last_model_prediction(10), _last_model_prediction(11)};
+					const Vector3f pos_pred{x_pred_ref(9), x_pred_ref(10), x_pred_ref(11)};
 					model_pred_pos_error = (pos_now - pos_pred).norm();
 
 					const Vector3f vel_now{x_now(0), x_now(1), x_now(2)};
-					const Vector3f vel_pred{_last_model_prediction(0), _last_model_prediction(1), _last_model_prediction(2)};
+					const Vector3f vel_pred{x_pred_ref(0), x_pred_ref(1), x_pred_ref(2)};
 					model_pred_vel_error = (vel_now - vel_pred).norm();
 
-					const float dphi = matrix::wrap_pi(x_now(6) - _last_model_prediction(6));
-					const float dtheta = matrix::wrap_pi(x_now(7) - _last_model_prediction(7));
-					const float dpsi = matrix::wrap_pi(x_now(8) - _last_model_prediction(8));
+					const float dphi = matrix::wrap_pi(x_now(6) - x_pred_ref(6));
+					const float dtheta = matrix::wrap_pi(x_now(7) - x_pred_ref(7));
+					const float dpsi = matrix::wrap_pi(x_now(8) - x_pred_ref(8));
 					model_pred_att_error = sqrtf(dphi * dphi + dtheta * dtheta + dpsi * dpsi);
 				}
 			}
@@ -749,7 +779,7 @@ void FwMpcAvoidance::Run()
 			FwMpcController::StateVec x_pred{};
 			const float V_cruise = math::max(vel_N.norm(), 8.f);
 			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
-			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, u_cmd, x_pred);
+			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, dt, u_cmd, x_pred);
 			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
 
 			if (have_mpc_command) {
@@ -790,7 +820,8 @@ void FwMpcAvoidance::Run()
 					_last_valid_lon_sp = lon_sp;
 					_time_last_valid_mpc_setpoint = now;
 					_have_last_valid_mpc_setpoint = true;
-					_last_model_prediction = x_pred;
+					_last_model_prediction_horizon = _controller.last_solved_state_horizon();
+					_last_model_prediction_horizon_steps = _controller.horizon();
 					_time_last_model_prediction = now;
 					_have_last_model_prediction = true;
 				}
@@ -818,6 +849,7 @@ void FwMpcAvoidance::Run()
 
 	if (!mpc_active_now) {
 		_have_last_model_prediction = false;
+		_last_model_prediction_horizon_steps = 0;
 	}
 
 	_mpc_active_last = mpc_active_now;

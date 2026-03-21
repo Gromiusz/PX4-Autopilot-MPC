@@ -102,10 +102,12 @@ public:
 	 * @return true if a command is available (fresh QP solve or fallback from the last successful trajectory)
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);
+		  float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next);
 
 	int last_qp_status() const { return _last_qp_status; }
 	const QpDebug &last_qp_debug() const { return _last_qp_debug; }
+	int horizon() const { return _N; }
+	const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &last_solved_state_horizon() const { return _last_solved_xbar; }
 
 	Weights &weights() { return _weights; }
 	Limits &limits() { return _limits; }
@@ -153,6 +155,12 @@ private:
 				int &row_offset, int Nz_dx, int Nz_du);
 	void addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
 		       int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
+	void rolloutStateHorizon(const StateVec &x0, const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+				 matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar) const;
+	void rolloutAppliedStateSequence(const StateVec &x0, const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+					 matrix::Matrix<float, kStateSize, kMaxHorizon> &xapply) const;
+	bool sampleStateHorizon(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+			       float age_s, StateVec &x_sampled) const;
 
 	FixedWingMpcModel _model{};
 
@@ -171,7 +179,10 @@ private:
 	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _xbar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _ubar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _fallback_ubar{};
+	matrix::Matrix<float, kStateSize, kMaxHorizon> _fallback_xapply{};
+	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _last_solved_xbar{};
 	bool _have_fallback_trajectory{false};
+	float _time_since_last_solve_s{0.f};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};
