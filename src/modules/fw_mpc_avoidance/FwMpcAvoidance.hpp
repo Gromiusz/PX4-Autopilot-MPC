@@ -142,16 +142,16 @@ private:
 		(ParamFloat<px4::params::FW_MPC_AV_TERM>) _param_fw_mpc_av_term,
 		(ParamFloat<px4::params::FW_MPC_AV_CTL>) _param_fw_mpc_av_ctl,
 		(ParamFloat<px4::params::FW_MPC_MIN_ALT>) _param_fw_mpc_min_alt,
+		(ParamFloat<px4::params::FW_MPC_MASS>) _param_fw_mpc_mass,
+		(ParamFloat<px4::params::FW_MPC_IXX>) _param_fw_mpc_ixx,
+		(ParamFloat<px4::params::FW_MPC_IYY>) _param_fw_mpc_iyy,
+		(ParamFloat<px4::params::FW_MPC_IZZ>) _param_fw_mpc_izz,
+		(ParamFloat<px4::params::FW_MPC_KDV>) _param_fw_mpc_kdv,
+		(ParamFloat<px4::params::FW_MPC_KDW>) _param_fw_mpc_kdw,
 		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
 		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
 		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
 		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
-		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
-		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
-		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,
-		(ParamFloat<px4::params::SIH_IYY>) _param_sih_iyy,
-		(ParamFloat<px4::params::SIH_IZZ>) _param_sih_izz,
-		(ParamFloat<px4::params::SIH_KDV>) _param_sih_kdv,
-		(ParamFloat<px4::params::SIH_KDW>) _param_sih_kdw
+		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min
 	)
 };

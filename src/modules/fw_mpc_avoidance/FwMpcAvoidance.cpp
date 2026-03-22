@@ -44,8 +44,8 @@ bool FwMpcAvoidance::init()
 {
 	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
 	_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon);
-	const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
-	_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
+	const matrix::Vector3f I_diag{_param_fw_mpc_ixx.get(), _param_fw_mpc_iyy.get(), _param_fw_mpc_izz.get()};
+	_controller.set_vehicle_params(_param_fw_mpc_mass.get(), I_diag, _param_fw_mpc_kdv.get(), _param_fw_mpc_kdw.get());
 	_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
 	_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
 	_controller.weights().avoidance_tracking_scale_min = math::constrain(_param_fw_mpc_av_trk.get(), 0.05f, 1.f);
@@ -78,8 +78,8 @@ void FwMpcAvoidance::parameters_update()
 			PX4_ERR("fw mpc config failed");
 		}
 
-		const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
-		_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
+		const matrix::Vector3f I_diag{_param_fw_mpc_ixx.get(), _param_fw_mpc_iyy.get(), _param_fw_mpc_izz.get()};
+		_controller.set_vehicle_params(_param_fw_mpc_mass.get(), I_diag, _param_fw_mpc_kdv.get(), _param_fw_mpc_kdw.get());
 		_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
 		_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
 		_controller.weights().avoidance_tracking_scale_min = math::constrain(_param_fw_mpc_av_trk.get(), 0.05f, 1.f);

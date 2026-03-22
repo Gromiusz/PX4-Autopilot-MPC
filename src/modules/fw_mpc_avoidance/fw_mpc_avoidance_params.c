@@ -41,7 +41,7 @@ PARAM_DEFINE_INT32(FW_MPC_HORIZON, 64);
 /**
  * Internal MPC model integration step [s].
  *
- * Sets the integration step used by the internal SIH-like model during rollouts.
+ * Sets the integration step used by the internal legacy MPC model during rollouts.
  *
  * @unit s
  * @min 0.005
@@ -252,3 +252,91 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_CTL, 0.25f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_MIN_ALT, 10.0f);
+
+/**
+ * Legacy MPC model mass.
+ *
+ * Mass used by the internal full-state MPC model. This is intentionally
+ * separate from SIH_* so the avoidance model can be tuned independently of
+ * simulator_sih.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg
+ * @min 0.1
+ * @max 50.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_MASS, 1.0f);
+
+/**
+ * Legacy MPC model inertia Ixx.
+ *
+ * Roll-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IXX, 0.197563f);
+
+/**
+ * Legacy MPC model inertia Iyy.
+ *
+ * Pitch-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IYY, 0.1458929f);
+
+/**
+ * Legacy MPC model inertia Izz.
+ *
+ * Yaw-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IZZ, 0.1477f);
+
+/**
+ * Legacy MPC model linear damping gain.
+ *
+ * Damping gain passed to the internal aerodynamic model for lateral/vertical
+ * velocity damping.
+ *
+ * @min 0.0
+ * @max 20.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_KDV, 1.0f);
+
+/**
+ * Legacy MPC model angular damping gain.
+ *
+ * Damping gain passed to the internal aerodynamic model for angular-rate
+ * damping.
+ *
+ * @min 0.0
+ * @max 5.0
+ * @decimal 4
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_KDW, 0.025f);
