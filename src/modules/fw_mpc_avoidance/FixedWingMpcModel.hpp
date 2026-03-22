@@ -50,7 +50,7 @@ public:
 		E(2, 0) = 0.f;  E(2, 1) = sinf(phi) / ct_safe; E(2, 2) = cosf(phi) / ct_safe;
 
 		const matrix::Vector3f eul_dot = E * pqr;
-		const matrix::Vector3f pos_dot_ned = R_nb * uvw;
+		const matrix::Vector3f pos_dot_ned = R_nb * uvw + _wind_ned;
 
 		State dx;
 		dx(0) = uvw_dot(0);
@@ -92,6 +92,7 @@ public:
 
 	void set_mass(float m) { _mass = math::max(m, 0.1f); }
 	void set_altitude_origin_amsl(float altitude_origin_amsl) { _altitude_origin_amsl = altitude_origin_amsl; }
+	void set_wind_ned(const matrix::Vector3f &wind_ned) { _wind_ned = wind_ned; }
 	void set_inertia_diag(const matrix::Vector3f &diag)
 	{
 		matrix::Vector3f d = diag.emult(matrix::Vector3f{1.f, 1.f, 1.f});
@@ -139,5 +140,6 @@ private:
 	const float _CD0 = 0.029f;
 	const float _k = 1.f / (M_PI_F * 0.97f * 6.5f);
 	float _altitude_origin_amsl{0.f};
+	matrix::Vector3f _wind_ned{};
 	mutable FwMpcAero _aero{};
 };

@@ -53,6 +53,7 @@ public:
 		matrix::Vector4f u_max{0.1f, 0.3f, 0.1f, 24.f};
 		bool use_stage_smoothness{true};
 		bool use_rate_limits{false};
+		// Absolute per-step input delta limit applied between horizon stages.
 		matrix::Vector4f du_rate{0.15f, 0.15f, 0.15f, 0.30f};
 	};
 
@@ -116,9 +117,10 @@ public:
 
 	const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar() const { return _ubar; }
 
-	// Tune vehicle dynamics (shared with SIH parameters)
+	// Tune legacy MPC vehicle dynamics.
 	void set_vehicle_params(float mass, const matrix::Vector3f &inertia_diag, float kdv, float kdw);
 	void set_altitude_origin_amsl(float altitude_origin_amsl) { _model.set_altitude_origin_amsl(altitude_origin_amsl); }
+	void set_wind_ned(const matrix::Vector3f &wind_ned) { _model.set_wind_ned(wind_ned); }
 
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;

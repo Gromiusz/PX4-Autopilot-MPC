@@ -10,6 +10,7 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
+#include <uORB/topics/fixed_wing_lateral_status.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fw_mpc_obstacles.h>
 #include <uORB/topics/home_position.h>
@@ -18,12 +19,14 @@
 #include <uORB/topics/mpc_status.h>
 #include <uORB/topics/obstacle_position.h>
 #include <uORB/topics/parameter_update.h>
+#include <uORB/topics/airspeed_validated.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/wind.h>
 
 /**
  * Fixed-wing MPC avoidance prototype module.
@@ -43,6 +46,8 @@ public:
 private:
 	void Run() override;
 	void parameters_update();
+	void configure_controller_runtime();
+	float limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const;
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
 	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
 				     float pitch_min_rad, float pitch_max_rad) const;
@@ -70,6 +75,7 @@ private:
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _airspeed_validated_sub{ORB_ID(airspeed_validated)};
 	uORB::Subscription _rates_sub{ORB_ID(vehicle_angular_velocity)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
@@ -77,7 +83,9 @@ private:
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Subscription _mission_sub{ORB_ID(mission)};
 	uORB::Subscription _fw_nominal_lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
+	uORB::Subscription _fw_lat_status_sub{ORB_ID(fixed_wing_lateral_status)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
+	uORB::Subscription _wind_sub{ORB_ID(wind)};
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
 
@@ -107,6 +115,8 @@ private:
 	bool _have_last_active_console_state{false};
 	bool _last_console_active{false};
 	bool _last_console_solve_success{false};
+	mutable bool _have_last_published_roll_sp{false};
+	mutable float _last_published_roll_sp_rad{0.f};
 	int _last_console_qp_tier{-1};
 	int _last_console_qp_status{0};
 	int _last_model_prediction_horizon_steps{0};
@@ -151,6 +161,7 @@ private:
 		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
 		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
 		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+		(ParamFloat<px4::params::FW_PN_R_SLEW_MAX>) _param_fw_pn_r_slew_max,
 		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
 		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min
 	)
