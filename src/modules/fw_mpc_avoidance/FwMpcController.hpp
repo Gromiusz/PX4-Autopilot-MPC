@@ -81,6 +81,9 @@ public:
 		int iterations{0};
 		int status_polish{0};
 		float solve_time_us{0.f};
+		float nonlinear_min_clearance{NAN};
+		float accepted_step_scale{NAN};
+		bool full_step_rejected{false};
 	};
 
 	FwMpcController() = default;
@@ -124,6 +127,10 @@ public:
 	void set_guidance_quality_factor(float guidance_quality_factor)
 	{
 		_guidance_quality_factor = math::constrain(guidance_quality_factor, 0.05f, 1.f);
+	}
+	void set_robustness_margin(float robustness_margin)
+	{
+		_robustness_margin = math::max(robustness_margin, 0.f);
 	}
 
 private:
@@ -170,6 +177,8 @@ private:
 					 matrix::Matrix<float, kStateSize, kMaxHorizon> &xapply) const;
 	bool sampleStateHorizon(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 			       float age_s, StateVec &x_sampled) const;
+	float obstacle_signed_clearance(const matrix::Vector3f &p, const Obstacle &obs, bool include_planning_margin) const;
+	float nonlinear_min_hard_clearance(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N) const;
 
 	FixedWingMpcModel _model{};
 
@@ -193,6 +202,7 @@ private:
 	bool _have_fallback_trajectory{false};
 	float _time_since_last_solve_s{0.f};
 	float _guidance_quality_factor{1.f};
+	float _robustness_margin{0.f};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};

@@ -331,7 +331,7 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		for (int j = 0; j < _n_obstacles; j++) {
 			const Obstacle &obs = _obstacles[j];
 			const float planning_margin = include_planning_margin ? math::max(obs.planning_margin, 0.f) : 0.f;
-			const float radius = obs.R + obs.margin + planning_margin;
+			const float radius = obs.R + obs.margin + planning_margin + _robustness_margin;
 			const Vector2f obs_xy{obs.c(0), obs.c(1)};
 			const Vector2f rel_xy = obs_xy - Vector2f{p_now(0), p_now(1)};
 
@@ -343,7 +343,7 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 			float obstacle_distance = horizontal_distance_to_surface;
 
 			if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
-				const float half_height = 0.5f * obs.height + obs.margin;
+				const float half_height = 0.5f * obs.height + obs.margin + _robustness_margin;
 				const float vertical_distance_to_surface = fabsf(p_now(2) - obs.c(2)) - half_height;
 
 				if (vertical_distance_to_surface > 0.f) {
@@ -471,7 +471,7 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		last_attempt_slack_max = PX4_ISFINITE(_last_qp_debug.active_slack_max) ? _last_qp_debug.active_slack_max : 0.f;
 	}
 
-	const bool use_fallback_trajectory = !solved && _have_fallback_trajectory;
+	bool use_fallback_trajectory = !solved && _have_fallback_trajectory;
 
 	if (!solved && use_fallback_trajectory) {
 		// Reuse the tail of the last successful plan instead of reusing a failed local update.
@@ -491,11 +491,89 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 	ControlVec u_selected{};
 
 	if (solved) {
-		rolloutStateHorizon(x_now, _ubar, selected_xbar);
-		solved_ubar = _ubar;
-		_last_solved_xbar = selected_xbar;
-		x_next = selected_xbar.col(1);
-		u_selected = _ubar.col(0);
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> qp_ubar = _ubar;
+		const std::array<float, 4> acceptance_step_scales{1.f, 0.5f, 0.25f, 0.125f};
+		float best_trial_clearance = -INFINITY;
+		float accepted_alpha = NAN;
+		bool accepted = (_n_obstacles <= 0);
+		bool full_step_rejected = false;
+
+		if (accepted) {
+			rolloutStateHorizon(x_now, qp_ubar, selected_xbar);
+			best_trial_clearance = INFINITY;
+			accepted_alpha = 1.f;
+
+		} else {
+			for (int alpha_idx = 0; alpha_idx < static_cast<int>(acceptance_step_scales.size()); alpha_idx++) {
+				const float alpha = acceptance_step_scales[alpha_idx];
+				matrix::Matrix<float, kControlSize, kMaxHorizon> trial_ubar{};
+
+				for (int k = 0; k < _N; k++) {
+					ControlVec u_trial{};
+
+					for (int i = 0; i < kControlSize; i++) {
+						const float delta = qp_ubar(i, k) - base_ubar(i, k);
+						u_trial(i) = math::constrain(base_ubar(i, k) + alpha * delta, _limits.u_min(i), _limits.u_max(i));
+					}
+
+					trial_ubar.col(k) = u_trial;
+				}
+
+				matrix::Matrix<float, kStateSize, kMaxHorizon + 1> trial_xbar{};
+				rolloutStateHorizon(x_now, trial_ubar, trial_xbar);
+				const float trial_clearance = nonlinear_min_hard_clearance(trial_xbar, _N);
+				best_trial_clearance = math::max(best_trial_clearance, trial_clearance);
+
+				if (alpha_idx == 0 && PX4_ISFINITE(trial_clearance) && trial_clearance < 0.f) {
+					full_step_rejected = true;
+				}
+
+				if (!PX4_ISFINITE(trial_clearance) || trial_clearance >= -1e-3f) {
+					_ubar = trial_ubar;
+					selected_xbar = trial_xbar;
+					accepted_alpha = alpha;
+					accepted = true;
+					break;
+				}
+			}
+		}
+
+		_last_qp_debug.nonlinear_min_clearance = best_trial_clearance;
+		_last_qp_debug.accepted_step_scale = accepted_alpha;
+		_last_qp_debug.full_step_rejected = full_step_rejected;
+
+		if (accepted) {
+			solved_ubar = _ubar;
+			_last_solved_xbar = selected_xbar;
+			x_next = selected_xbar.col(1);
+			u_selected = _ubar.col(0);
+
+		} else {
+			solved = false;
+			_last_qp_debug.solve_success = false;
+
+			if (_have_fallback_trajectory) {
+				_ubar = _fallback_ubar;
+				const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
+				const int control_idx = math::constrain(static_cast<int>(floorf(fallback_age_s / math::max(_Ts, 1e-3f))),
+							       0, _N - 1);
+				const float lookahead_age_s = math::min(fallback_age_s + _Ts, static_cast<float>(_N) * _Ts);
+
+				for (int i = 0; i < kControlSize; i++) {
+					u_selected(i) = _fallback_ubar(i, control_idx);
+				}
+
+				if (!sampleStateHorizon(_last_solved_xbar, lookahead_age_s, x_next)) {
+					x_next = fd_step(x_now, u_selected);
+				}
+
+			} else {
+				_ubar = base_ubar;
+				rolloutStateHorizon(x_now, _ubar, selected_xbar);
+				x_next = selected_xbar.col(1);
+				u_selected = _ubar.col(0);
+			}
+		}
 
 	} else if (use_fallback_trajectory) {
 		const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
@@ -604,6 +682,40 @@ bool FwMpcController::sampleStateHorizon(const matrix::Matrix<float, kStateSize,
 	}
 
 	return true;
+}
+
+float FwMpcController::obstacle_signed_clearance(const Vector3f &p, const Obstacle &obs, bool include_planning_margin) const
+{
+	const float planning_margin = include_planning_margin ? math::max(obs.planning_margin, 0.f) : 0.f;
+	const float radius = obs.R + obs.margin + planning_margin + _robustness_margin;
+	const float horizontal_clearance = Vector2f{p(0) - obs.c(0), p(1) - obs.c(1)}.norm() - radius;
+
+	if (!(PX4_ISFINITE(obs.height) && obs.height > 0.f)) {
+		return horizontal_clearance;
+	}
+
+	const float half_height = 0.5f * obs.height + obs.margin + _robustness_margin;
+	const float vertical_clearance = fabsf(p(2) - obs.c(2)) - half_height;
+	return math::max(horizontal_clearance, vertical_clearance);
+}
+
+float FwMpcController::nonlinear_min_hard_clearance(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N) const
+{
+	if (_n_obstacles <= 0) {
+		return INFINITY;
+	}
+
+	float min_clearance = INFINITY;
+
+	for (int k = 1; k <= N; k++) {
+		const Vector3f p{xbar(9, k), xbar(10, k), xbar(11, k)};
+
+		for (int j = 0; j < _n_obstacles; j++) {
+			min_clearance = math::min(min_clearance, obstacle_signed_clearance(p, _obstacles[j], false));
+		}
+	}
+
+	return min_clearance;
 }
 
 FwMpcController::Weights FwMpcController::weights_for_solve_tier(const Weights &base_weights, int tier) const
@@ -756,9 +868,8 @@ void FwMpcController::computeActiveObstacles(const matrix::Matrix<float, kStateS
 
 		for (int k = 0; k <= N; k++) {
 			const Vector3f pbar{xbar(9, k), xbar(10, k), xbar(11, k)};
-
 			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
 				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
 
 				if (vertical_distance_to_surface > relevance_distance) {
@@ -766,10 +877,8 @@ void FwMpcController::computeActiveObstacles(const matrix::Matrix<float, kStateS
 				}
 			}
 
-			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin;
-			const Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
-			const float horizontal_distance_to_surface = dvec_xy.norm() - Rbuf;
-			min_distance = math::min(min_distance, horizontal_distance_to_surface);
+			const float clearance = obstacle_signed_clearance(pbar, _obstacles[j], true);
+			min_distance = math::min(min_distance, clearance);
 		}
 
 		active_obstacles[j] = PX4_ISFINITE(min_distance) && min_distance <= relevance_distance;
@@ -892,9 +1001,8 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 			if (!active_obstacles[j]) {
 				continue;
 			}
-
 			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
 				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
 
 				if (vertical_distance_to_surface > 0.f) {
@@ -902,7 +1010,7 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 				}
 			}
 
-			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin;
+			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
 			Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
 			float d_xy = dvec_xy.norm();
 
@@ -977,18 +1085,16 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 				if (!active_obstacles[j]) {
 					continue;
 				}
-
 				if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-					const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+					const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
 					const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
 
-					// Same height gating as obstacle constraints.
 					if (vertical_distance_to_surface > 0.f) {
 						continue;
 					}
 				}
 
-				const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin;
+				const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
 				Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
 				float d_xy = dvec_xy.norm();
 
@@ -1119,6 +1225,9 @@ bool FwMpcController::solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, in
 	_last_qp_debug.active_slack_max = NAN;
 	_last_qp_debug.active_slack_sum = NAN;
 	_last_qp_debug.solve_time_us = NAN;
+	_last_qp_debug.nonlinear_min_clearance = NAN;
+	_last_qp_debug.accepted_step_scale = NAN;
+	_last_qp_debug.full_step_rejected = false;
 	_last_qp_debug.status_polish = 0;
 
 	// Symmetrize H
@@ -1275,18 +1384,16 @@ void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateS
 			if (!active_obstacles[j]) {
 				continue;
 			}
-
 			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin;
+				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
 				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
 
-				// Finite-height obstacle does not constrain the solution outside its vertical span.
 				if (vertical_distance_to_surface > 0.f) {
 					continue;
 				}
 			}
 
-			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin;
+			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
 			Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
 			float d_xy = dvec_xy.norm();
 
@@ -1296,7 +1403,7 @@ void FwMpcController::addObstacleConstraints(const matrix::Matrix<float, kStateS
 			}
 
 			// Hard inner obstacle: exact obstacle radius + physical margin, no slack allowed.
-			const float Rhard = _obstacles[j].R + _obstacles[j].margin;
+			const float Rhard = _obstacles[j].R + _obstacles[j].margin + _robustness_margin;
 			const float gbar_hard = Rhard - d_xy;
 			const Vector2f gradg_xy = -(dvec_xy / d_xy);
 

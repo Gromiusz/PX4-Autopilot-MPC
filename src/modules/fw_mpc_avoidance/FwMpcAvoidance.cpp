@@ -526,7 +526,8 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 					float model_pred_vel_error, float model_pred_att_error, float model_pred_age_s,
 					bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value, float qp_primal_residual,
 					float qp_dual_residual, float qp_active_slack_max, float qp_active_slack_sum,
-					int qp_iterations, float qp_solve_time_us)
+					int qp_iterations, float qp_solve_time_us, float qp_nonlinear_min_clearance,
+					float qp_accepted_step_scale, bool qp_full_step_rejected)
 {
 	mpc_status_s status{};
 	status.timestamp = hrt_absolute_time();
@@ -555,6 +556,9 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.qp_iterations = qp_iterations;
 	status.qp_solve_time_us = qp_solve_time_us;
 	status.last_qp_status = qp_status;
+	status.qp_nonlinear_min_clearance = qp_nonlinear_min_clearance;
+	status.qp_accepted_step_scale = qp_accepted_step_scale;
+	status.qp_full_step_rejected = qp_full_step_rejected;
 	_mpc_status_pub.publish(status);
 }
 
@@ -831,6 +835,16 @@ void FwMpcAvoidance::Run()
 			}
 
 			_controller.set_guidance_quality_factor(can_run_factor);
+			const float model_pos_error_term = PX4_ISFINITE(model_pred_pos_error) ? math::max(model_pred_pos_error, 0.f) : 0.f;
+			const float prediction_age_term = PX4_ISFINITE(model_pred_age_s) ? math::max(model_pred_age_s, 0.f) : 0.f;
+			const float robust_margin = math::constrain(
+							 math::max(_param_fw_mpc_rb_base.get(), 0.f)
+							 + math::max(_param_fw_mpc_rb_vscl.get(), 0.f) * math::max(vehicle_airspeed_ref, 0.f)
+							 + math::max(_param_fw_mpc_rb_perr.get(), 0.f) * model_pos_error_term
+							 + math::max(_param_fw_mpc_rb_fage.get(), 0.f) * prediction_age_term
+							 + math::max(_param_fw_mpc_rb_qfac.get(), 0.f) * math::max(1.f - can_run_factor, 0.f),
+							 0.f, 20.f);
+			_controller.set_robustness_margin(robust_margin);
 			FwMpcController::ControlVec u_cmd{};
 			FwMpcController::StateVec x_pred{};
 			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
@@ -938,7 +952,8 @@ void FwMpcAvoidance::Run()
 			   qp_debug.solve_tier_used,
 			   qp_debug.status_polish, qp_debug.objective_value, qp_debug.primal_residual,
 			   qp_debug.dual_residual, qp_debug.active_slack_max, qp_debug.active_slack_sum,
-			   qp_debug.iterations, qp_debug.solve_time_us);
+			   qp_debug.iterations, qp_debug.solve_time_us, qp_debug.nonlinear_min_clearance,
+			   qp_debug.accepted_step_scale, qp_debug.full_step_rejected);
 
 	if (have_lat) {
 		if (mpc_active_now && PX4_ISFINITE(lat_sp.lateral_acceleration)) {

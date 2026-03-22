@@ -73,7 +73,8 @@ private:
 			       float model_pred_age_s, bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value,
 			       float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
 			       float qp_active_slack_sum, int qp_iterations,
-			       float qp_solve_time_us);
+			       float qp_solve_time_us, float qp_nonlinear_min_clearance,
+			       float qp_accepted_step_scale, bool qp_full_step_rejected);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
@@ -170,6 +171,11 @@ private:
 			(ParamFloat<px4::params::FW_P_RMAX_NEG>) _param_fw_p_rmax_neg,
 			(ParamFloat<px4::params::FW_P_RMAX_POS>) _param_fw_p_rmax_pos,
 			(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
-			(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min
+			(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
+			(ParamFloat<px4::params::FW_MPC_RB_BASE>) _param_fw_mpc_rb_base,
+			(ParamFloat<px4::params::FW_MPC_RB_VSCL>) _param_fw_mpc_rb_vscl,
+			(ParamFloat<px4::params::FW_MPC_RB_PERR>) _param_fw_mpc_rb_perr,
+			(ParamFloat<px4::params::FW_MPC_RB_FAGE>) _param_fw_mpc_rb_fage,
+			(ParamFloat<px4::params::FW_MPC_RB_QFAC>) _param_fw_mpc_rb_qfac
 		)
 };

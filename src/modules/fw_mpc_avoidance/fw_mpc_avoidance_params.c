@@ -340,3 +340,71 @@ PARAM_DEFINE_FLOAT(FW_MPC_KDV, 1.0f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_KDW, 0.025f);
+
+/**
+ * Base robust obstacle inflation margin.
+ *
+ * Additional margin applied to both hard and soft obstacle constraints to
+ * compensate for model mismatch and tracking uncertainty.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_BASE, 0.25f);
+
+/**
+ * Robust margin gain on airspeed.
+ *
+ * Additional obstacle inflation proportional to current true airspeed.
+ *
+ * @unit s
+ * @min 0.0
+ * @max 1.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_VSCL, 0.02f);
+
+/**
+ * Robust margin gain on model position error.
+ *
+ * Additional obstacle inflation proportional to the observed model prediction
+ * position error.
+ *
+ * @min 0.0
+ * @max 5.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_PERR, 0.25f);
+
+/**
+ * Robust margin gain on prediction age / fallback age.
+ *
+ * Additional obstacle inflation proportional to the age of the last accepted
+ * model prediction.
+ *
+ * @unit m/s
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_FAGE, 0.75f);
+
+/**
+ * Robust margin gain on guidance quality loss.
+ *
+ * Additional obstacle inflation proportional to loss of downstream guidance
+ * authority, expressed as (1 - can_run_factor).
+ *
+ * @unit m
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_QFAC, 1.50f);
