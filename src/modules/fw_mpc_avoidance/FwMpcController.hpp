@@ -125,6 +125,9 @@ private:
 
 	StateVec fd_step(const StateVec &x0, const ControlVec &u) const;
 	void lin_fd(const StateVec &x, const ControlVec &u, StateMat &A, matrix::Matrix<float, kStateSize, kControlSize> &B) const;
+	bool solve_model_steady_reference(float V_target, float z_up, float phi_ref, float psi_ref, float gamma_ref,
+					  float alpha_seed, float thrust_seed,
+					  float &alpha_ref, float &theta_ref, float &thrust_ref) const;
 	void ff_refs_from_nominal(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 				  const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float Vc,
 				  matrix::Vector<float, kMaxHorizon> &theta_ref_seq,

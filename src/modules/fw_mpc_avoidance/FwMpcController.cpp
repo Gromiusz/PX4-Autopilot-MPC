@@ -119,27 +119,40 @@ void FwMpcController::clear_obstacles()
 FwMpcController::StateVec FwMpcController::initTrim(float V_trim, float z0_up, const matrix::Vector3f &goal_up)
 {
 	_V_trim = V_trim;
-
-	const float mass = _model.mass();
-	const float qdyn = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area();
-	const float CLreq = mass * _model.gravity() / qdyn;
-
-	_alpha_trim = (CLreq - _model.CL0()) / _model.CL_alpha();
-	const float CD = _model.CD0() + _model.induced_drag_k() * CLreq * CLreq;
-	_T_trim = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area() * CD;
-	_theta_trim = _alpha_trim;
-
-	const float u0 = V_trim * cosf(_alpha_trim);
 	const float v0 = 0.f;
-	const float w0 = V_trim * sinf(_alpha_trim);
 
 	const Vector3f dp = goal_up - Vector3f{0.f, 0.f, z0_up};
 	const float psi0 = atan2f(dp(1), dp(0));
+	float alpha_trim = _alpha_trim;
+	float theta_trim = _theta_trim;
+	float thrust_trim = _T_trim;
+	const float alpha_seed = PX4_ISFINITE(_alpha_trim) ? _alpha_trim : 0.08f;
+	const float thrust_seed = PX4_ISFINITE(_T_trim) ? _T_trim : 0.5f;
+
+	if (!solve_model_steady_reference(V_trim, z0_up, 0.f, psi0, 0.f,
+					  alpha_seed,
+					  thrust_seed,
+					  alpha_trim, theta_trim, thrust_trim)) {
+		const float mass = _model.mass();
+		const float qdyn = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area();
+		const float CLreq = mass * _model.gravity() / math::max(qdyn, 1e-3f);
+		alpha_trim = (CLreq - _model.CL0()) / _model.CL_alpha();
+		const float CD = _model.CD0() + _model.induced_drag_k() * CLreq * CLreq;
+		thrust_trim = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area() * CD;
+		theta_trim = alpha_trim;
+	}
+
+	_alpha_trim = alpha_trim;
+	_theta_trim = theta_trim;
+	_T_trim = thrust_trim;
+
+	const float u_trimmed = V_trim * cosf(_alpha_trim);
+	const float w_trimmed = V_trim * sinf(_alpha_trim);
 
 	StateVec x0{};
-	x0(0) = u0;
+	x0(0) = u_trimmed;
 	x0(1) = v0;
-	x0(2) = w0;
+	x0(2) = w_trimmed;
 	x0(3) = 0.f;
 	x0(4) = 0.f;
 	x0(5) = 0.f;
@@ -178,6 +191,92 @@ void FwMpcController::set_vehicle_params(float mass, const matrix::Vector3f &ine
 	_model.set_mass(mass);
 	_model.set_inertia_diag(inertia_diag);
 	_model.set_damping(kdv, kdw);
+}
+
+bool FwMpcController::solve_model_steady_reference(float V_target, float z_up, float phi_ref, float psi_ref,
+		float gamma_ref, float alpha_seed, float thrust_seed,
+		float &alpha_ref, float &theta_ref, float &thrust_ref) const
+{
+	const float V = math::max(V_target, 3.f);
+	float alpha = math::constrain(alpha_seed, -0.35f, 0.35f);
+	float thrust = math::constrain(thrust_seed, _limits.u_min(3), _limits.u_max(3));
+	const float hdot_des = V * sinf(gamma_ref);
+	const float alpha_eps = 1e-3f;
+	const float thrust_eps = 0.25f;
+	bool converged = false;
+
+	auto evaluate_reference = [&](float alpha_eval, float thrust_eval, float &vdot, float &hdot) {
+		StateVec x{};
+		x(0) = V * cosf(alpha_eval);
+		x(1) = 0.f;
+		x(2) = V * sinf(alpha_eval);
+		x(3) = 0.f;
+		x(4) = 0.f;
+		x(5) = 0.f;
+		x(6) = phi_ref;
+		x(7) = alpha_eval + gamma_ref;
+		x(8) = psi_ref;
+		x(9) = 0.f;
+		x(10) = 0.f;
+		x(11) = z_up;
+
+		ControlVec u{};
+		u(0) = 0.f;
+		u(1) = 0.f;
+		u(2) = 0.f;
+		u(3) = thrust_eval;
+
+		const StateVec dx = _model.dynamics(x, u);
+		const Vector3f vel_body{x(0), x(1), x(2)};
+		const Vector3f acc_body{dx(0), dx(1), dx(2)};
+		vdot = vel_body.dot(acc_body) / V;
+		hdot = dx(11);
+	};
+
+	for (int iter = 0; iter < 6; iter++) {
+		float vdot = 0.f;
+		float hdot = 0.f;
+		evaluate_reference(alpha, thrust, vdot, hdot);
+		const float f_v = vdot;
+		const float f_h = hdot - hdot_des;
+
+		if (fabsf(f_v) < 0.05f && fabsf(f_h) < 0.15f) {
+			converged = true;
+			break;
+		}
+
+		float vdot_alpha = 0.f;
+		float hdot_alpha = 0.f;
+		float vdot_thrust = 0.f;
+		float hdot_thrust = 0.f;
+		evaluate_reference(math::constrain(alpha + alpha_eps, -0.35f, 0.35f), thrust, vdot_alpha, hdot_alpha);
+		evaluate_reference(alpha, math::constrain(thrust + thrust_eps, _limits.u_min(3), _limits.u_max(3)),
+				   vdot_thrust, hdot_thrust);
+
+		const float j11 = (vdot_alpha - vdot) / alpha_eps;
+		const float j12 = (vdot_thrust - vdot) / thrust_eps;
+		const float j21 = (hdot_alpha - hdot) / alpha_eps;
+		const float j22 = (hdot_thrust - hdot) / thrust_eps;
+		const float det = j11 * j22 - j12 * j21;
+
+		if (!PX4_ISFINITE(det) || fabsf(det) < 1e-5f) {
+			break;
+		}
+
+		float d_alpha = ((-f_v) * j22 + j12 * f_h) / det;
+		float d_thrust = (j21 * f_v - j11 * f_h) / det;
+
+		d_alpha = math::constrain(d_alpha, -0.05f, 0.05f);
+		d_thrust = math::constrain(d_thrust, -2.0f, 2.0f);
+
+		alpha = math::constrain(alpha + 0.8f * d_alpha, -0.35f, 0.35f);
+		thrust = math::constrain(thrust + 0.8f * d_thrust, _limits.u_min(3), _limits.u_max(3));
+	}
+
+	alpha_ref = alpha;
+	theta_ref = alpha + gamma_ref;
+	thrust_ref = thrust;
+	return converged;
 }
 
 bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
@@ -574,33 +673,35 @@ void FwMpcController::ff_refs_from_nominal(const matrix::Matrix<float, kStateSiz
 		matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
 		matrix::Vector<float, kMaxHorizon> &T_ref_seq) const
 {
-	const float mass = _model.mass();
-	const float rho = _model.rho();
-	const float S = _model.wing_area();
-	const float g = _model.gravity();
+	float alpha_seed = _alpha_trim;
+	float thrust_seed = _T_trim;
 
 	for (int k = 0; k < _N; k++) {
 		const int state_idx = math::min(k + 1, _N);
 		const Vector3f vel{xbar(0, state_idx), xbar(1, state_idx), xbar(2, state_idx)};
-		const float V = math::max(vel.norm(), 1.f);
+		const float V = math::max(vel.norm(), math::max(Vc, 3.f));
 		const float phi = xbar(6, state_idx);
+		const float psi = xbar(8, state_idx);
 		const float z_now = xbar(11, state_idx);
 		const float z_targ = x_ref_seq(2, k);
 
 		float vz_des = (z_targ - z_now) / _Ts;
 		vz_des = math::constrain(vz_des, -0.2f * Vc, 0.2f * Vc);
+		const float gamma_ref = asinf(math::constrain(vz_des / V, -0.25f, 0.25f));
+		float alpha_ref = alpha_seed;
+		float theta_ref = _theta_trim + gamma_ref;
+		float thrust_ref = thrust_seed;
 
-		const float gamma_ref = asinf(math::constrain(vz_des / math::max(V, 1e-3f), -0.25f, 0.25f));
-		const float qd = 0.5f * rho * V * V;
-		const float Lreq = mass * g * cosf(gamma_ref) / math::max(cosf(phi), 0.2f);
-		const float CLreq = Lreq / (qd * S);
-		const float alpha_ref = (CLreq - _model.CL0()) / _model.CL_alpha();
-		const float theta_ref = alpha_ref + gamma_ref;
-		const float CD_ref = _model.CD0() + _model.induced_drag_k() * (CLreq * CLreq);
-		const float T_ref = qd * S * CD_ref + mass * g * sinf(gamma_ref);
+		if (!solve_model_steady_reference(V, z_now, phi, psi, gamma_ref, alpha_seed, thrust_seed,
+						  alpha_ref, theta_ref, thrust_ref)) {
+			theta_ref = _theta_trim + gamma_ref;
+			thrust_ref = thrust_seed;
+		}
 
+		alpha_seed = alpha_ref;
+		thrust_seed = thrust_ref;
 		theta_ref_seq(k) = theta_ref;
-		T_ref_seq(k) = T_ref;
+		T_ref_seq(k) = thrust_ref;
 	}
 }
 
