@@ -75,6 +75,26 @@ float FwMpcAvoidance::limit_roll_setpoint_for_downstream(float desired_roll_sp, 
 	return math::constrain(_last_published_roll_sp_rad + delta, -roll_lim_rad, roll_lim_rad);
 }
 
+float FwMpcAvoidance::limit_attitude_error_for_downstream(float desired_att_sp, float current_att,
+		float time_constant_s, float max_rate_neg_rad_s, float max_rate_pos_rad_s) const
+{
+	if (!PX4_ISFINITE(desired_att_sp) || !PX4_ISFINITE(current_att)) {
+		return desired_att_sp;
+	}
+
+	time_constant_s = math::max(time_constant_s, 0.f);
+	max_rate_neg_rad_s = math::max(max_rate_neg_rad_s, 0.f);
+	max_rate_pos_rad_s = math::max(max_rate_pos_rad_s, 0.f);
+
+	if (time_constant_s <= 1e-4f || (max_rate_neg_rad_s <= 1e-4f && max_rate_pos_rad_s <= 1e-4f)) {
+		return desired_att_sp;
+	}
+
+	const float max_neg_error = max_rate_neg_rad_s * time_constant_s;
+	const float max_pos_error = max_rate_pos_rad_s * time_constant_s;
+	return math::constrain(desired_att_sp, current_att - max_neg_error, current_att + max_pos_error);
+}
+
 bool FwMpcAvoidance::init()
 {
 	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
@@ -808,32 +828,47 @@ void FwMpcAvoidance::Run()
 			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, dt, u_cmd, x_pred);
 			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
 
-			if (have_mpc_command) {
-				fixed_wing_lateral_status_s fw_lat_status{};
-				const hrt_abstime lateral_status_timeout_us = 500000;
-				const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
-							 && PX4_ISFINITE(fw_lat_status.can_run_factor)
-							 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
-				const float can_run_factor = lateral_status_valid
-							    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
-							    : 1.f;
-				const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
-				const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
-				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
-				const float phi_cmd = limit_roll_setpoint_for_downstream(x_pred(6), dt);
-				const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
-				const float theta_cmd = constrain_pitch_safety(theta_cmd_raw, vehicle_airspeed_cas, x_now(11),
-						      pitch_min_rad, pitch_max_rad);
-				float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd) / can_run_factor;
-				lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
-				const float lateral_accel_pub_lim = CONSTANTS_ONE_G * tanf(roll_lim_rad) / can_run_factor;
-				lateral_accel_cmd = math::constrain(lateral_accel_cmd,
-								  -lateral_accel_pub_lim,
-								  lateral_accel_pub_lim);
+				if (have_mpc_command) {
+					fixed_wing_lateral_status_s fw_lat_status{};
+					const hrt_abstime lateral_status_timeout_us = 500000;
+					const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
+								 && PX4_ISFINITE(fw_lat_status.can_run_factor)
+								 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
+					const float can_run_factor = lateral_status_valid
+								    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
+								    : 1.f;
+					const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+					const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
+					const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
+					const float roll_rate_rad_s = math::radians(math::max(_param_fw_r_rmax.get(), 0.f));
+					const float pitch_rate_neg_rad_s = math::radians(math::max(_param_fw_p_rmax_neg.get(), 0.f));
+					const float pitch_rate_pos_rad_s = math::radians(math::max(_param_fw_p_rmax_pos.get(), 0.f));
+					const float phi_cmd_slewed = limit_roll_setpoint_for_downstream(x_pred(6), dt);
+					const float phi_cmd = limit_attitude_error_for_downstream(phi_cmd_slewed, x_now(6),
+							     _param_fw_r_tc.get(), roll_rate_rad_s, roll_rate_rad_s);
+					const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
+					const float theta_cmd_dyn = limit_attitude_error_for_downstream(theta_cmd_raw, x_now(7),
+							      _param_fw_p_tc.get(), pitch_rate_neg_rad_s, pitch_rate_pos_rad_s);
+					const float theta_cmd = constrain_pitch_safety(theta_cmd_dyn, vehicle_airspeed_cas, x_now(11),
+							      pitch_min_rad, pitch_max_rad);
+					float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd) / can_run_factor;
+					lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
+					const float lateral_accel_pub_lim = CONSTANTS_ONE_G * tanf(roll_lim_rad) / can_run_factor;
+					lateral_accel_cmd = math::constrain(lateral_accel_cmd,
+									  -lateral_accel_pub_lim,
+									  lateral_accel_pub_lim);
+					const matrix::Quatf q_pred(matrix::Eulerf(x_pred(6), x_pred(7), x_pred(8)));
+					const matrix::Dcmf R_nb_pred{q_pred};
+					const Vector3f v_air_pred_B{x_pred(0), x_pred(1), x_pred(2)};
+				const Vector3f v_air_pred_N = R_nb_pred * v_air_pred_B;
+				const Vector2f v_air_pred_xy{v_air_pred_N(0), v_air_pred_N(1)};
+				const float airspeed_direction_cmd = (v_air_pred_xy.norm() > 2.f)
+								     ? atan2f(v_air_pred_xy(1), v_air_pred_xy(0))
+								     : NAN;
 
 				lat_sp.timestamp = now;
 				lat_sp.course = NAN;
-				lat_sp.airspeed_direction = NAN;
+				lat_sp.airspeed_direction = airspeed_direction_cmd;
 				lat_sp.lateral_acceleration = lateral_accel_cmd;
 
 				if (have_nominal_lon) {

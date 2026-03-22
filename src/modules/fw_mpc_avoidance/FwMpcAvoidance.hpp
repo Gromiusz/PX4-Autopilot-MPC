@@ -48,6 +48,8 @@ private:
 	void parameters_update();
 	void configure_controller_runtime();
 	float limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const;
+	float limit_attitude_error_for_downstream(float desired_att_sp, float current_att,
+			float time_constant_s, float max_rate_neg_rad_s, float max_rate_pos_rad_s) const;
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
 	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
 				     float pitch_min_rad, float pitch_max_rad) const;
@@ -154,15 +156,20 @@ private:
 		(ParamFloat<px4::params::FW_MPC_MIN_ALT>) _param_fw_mpc_min_alt,
 		(ParamFloat<px4::params::FW_MPC_MASS>) _param_fw_mpc_mass,
 		(ParamFloat<px4::params::FW_MPC_IXX>) _param_fw_mpc_ixx,
-		(ParamFloat<px4::params::FW_MPC_IYY>) _param_fw_mpc_iyy,
-		(ParamFloat<px4::params::FW_MPC_IZZ>) _param_fw_mpc_izz,
-		(ParamFloat<px4::params::FW_MPC_KDV>) _param_fw_mpc_kdv,
-		(ParamFloat<px4::params::FW_MPC_KDW>) _param_fw_mpc_kdw,
-		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
-		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
-		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
-		(ParamFloat<px4::params::FW_PN_R_SLEW_MAX>) _param_fw_pn_r_slew_max,
-		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
-		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min
-	)
+			(ParamFloat<px4::params::FW_MPC_IYY>) _param_fw_mpc_iyy,
+			(ParamFloat<px4::params::FW_MPC_IZZ>) _param_fw_mpc_izz,
+			(ParamFloat<px4::params::FW_MPC_KDV>) _param_fw_mpc_kdv,
+			(ParamFloat<px4::params::FW_MPC_KDW>) _param_fw_mpc_kdw,
+			(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
+			(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
+			(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+			(ParamFloat<px4::params::FW_PN_R_SLEW_MAX>) _param_fw_pn_r_slew_max,
+			(ParamFloat<px4::params::FW_R_TC>) _param_fw_r_tc,
+			(ParamFloat<px4::params::FW_R_RMAX>) _param_fw_r_rmax,
+			(ParamFloat<px4::params::FW_P_TC>) _param_fw_p_tc,
+			(ParamFloat<px4::params::FW_P_RMAX_NEG>) _param_fw_p_rmax_neg,
+			(ParamFloat<px4::params::FW_P_RMAX_POS>) _param_fw_p_rmax_pos,
+			(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
+			(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min
+		)
 };
