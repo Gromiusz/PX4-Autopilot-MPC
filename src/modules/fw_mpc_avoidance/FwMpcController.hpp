@@ -121,6 +121,10 @@ public:
 	void set_vehicle_params(float mass, const matrix::Vector3f &inertia_diag, float kdv, float kdw);
 	void set_altitude_origin_amsl(float altitude_origin_amsl) { _model.set_altitude_origin_amsl(altitude_origin_amsl); }
 	void set_wind_ned(const matrix::Vector3f &wind_ned) { _model.set_wind_ned(wind_ned); }
+	void set_guidance_quality_factor(float guidance_quality_factor)
+	{
+		_guidance_quality_factor = math::constrain(guidance_quality_factor, 0.05f, 1.f);
+	}
 
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;
@@ -188,6 +192,7 @@ private:
 	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _last_solved_xbar{};
 	bool _have_fallback_trajectory{false};
 	float _time_since_last_solve_s{0.f};
+	float _guidance_quality_factor{1.f};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};

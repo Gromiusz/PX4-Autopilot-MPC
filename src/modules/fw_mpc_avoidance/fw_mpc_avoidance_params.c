@@ -211,7 +211,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 20.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.10f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.40f);
 
 /**
  * Minimum terminal waypoint tracking scale during strong avoidance.
@@ -224,7 +224,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.10f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.05f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.25f);
 
 /**
  * Minimum control penalty scale during strong avoidance.

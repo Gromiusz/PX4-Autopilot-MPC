@@ -81,6 +81,14 @@ public:
 	float mass() const { return _mass; }
 	float gravity() const { return _g; }
 	float rho() const { return _rho; }
+	float rho_from_altitude_amsl(float altitude_amsl) const
+	{
+		const float alt = math::max(altitude_amsl, 0.f);
+		const float temperature = math::max(288.15f - 0.0065f * alt, 180.f);
+		const float pressure = 101325.0f * powf(1.0f - 0.0065f * alt / 288.15f, 5.2561f);
+		return pressure / (287.1f * temperature);
+	}
+	float rho_from_state_altitude(float z_up) const { return rho_from_altitude_amsl(_altitude_origin_amsl + z_up); }
 	float wing_area() const { return _S; }
 	float wing_span() const { return _b; }
 	float mean_chord() const { return _c; }

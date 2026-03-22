@@ -713,6 +713,14 @@ void FwMpcAvoidance::Run()
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 		vehicle_speed = vel_N.norm();
+		fixed_wing_lateral_status_s fw_lat_status{};
+		const hrt_abstime lateral_status_timeout_us = 500000;
+		const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
+					 && PX4_ISFINITE(fw_lat_status.can_run_factor)
+					 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
+		const float can_run_factor = lateral_status_valid
+					    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
+					    : 1.f;
 		const bool trigger_now = have_state && have_goal
 				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance, nearest_obstacle_index);
 		obstacle_triggered = trigger_now;
@@ -822,21 +830,14 @@ void FwMpcAvoidance::Run()
 				_mpc_ready = true;
 			}
 
+			_controller.set_guidance_quality_factor(can_run_factor);
 			FwMpcController::ControlVec u_cmd{};
 			FwMpcController::StateVec x_pred{};
 			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
 			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, dt, u_cmd, x_pred);
 			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
 
-				if (have_mpc_command) {
-					fixed_wing_lateral_status_s fw_lat_status{};
-					const hrt_abstime lateral_status_timeout_us = 500000;
-					const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
-								 && PX4_ISFINITE(fw_lat_status.can_run_factor)
-								 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
-					const float can_run_factor = lateral_status_valid
-								    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
-								    : 1.f;
+			if (have_mpc_command) {
 					const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
 					const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
 					const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());

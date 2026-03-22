@@ -134,11 +134,12 @@ FwMpcController::StateVec FwMpcController::initTrim(float V_trim, float z0_up, c
 					  thrust_seed,
 					  alpha_trim, theta_trim, thrust_trim)) {
 		const float mass = _model.mass();
-		const float qdyn = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area();
+		const float rho = _model.rho_from_state_altitude(z0_up);
+		const float qdyn = 0.5f * rho * V_trim * V_trim * _model.wing_area();
 		const float CLreq = mass * _model.gravity() / math::max(qdyn, 1e-3f);
 		alpha_trim = (CLreq - _model.CL0()) / _model.CL_alpha();
 		const float CD = _model.CD0() + _model.induced_drag_k() * CLreq * CLreq;
-		thrust_trim = 0.5f * _model.rho() * V_trim * V_trim * _model.wing_area() * CD;
+		thrust_trim = 0.5f * rho * V_trim * V_trim * _model.wing_area() * CD;
 		theta_trim = alpha_trim;
 	}
 
@@ -300,7 +301,15 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		x_ref_seq(2, k) = goal_up(2);
 	}
 
-	const Weights base_weights = _weights;
+	const float guidance_quality = math::constrain(_guidance_quality_factor, 0.05f, 1.f);
+	const float authority_scale = 1.f / math::max(guidance_quality, 0.35f);
+	Weights base_weights = _weights;
+	base_weights.obstacle_proximity_weight *= authority_scale;
+	base_weights.obstacle_proximity_distance *= authority_scale;
+	base_weights.avoidance_tracking_scale_min = math::constrain(base_weights.avoidance_tracking_scale_min * guidance_quality, 0.05f, 1.f);
+	base_weights.avoidance_terminal_scale_min = math::constrain(base_weights.avoidance_terminal_scale_min * guidance_quality, 0.02f, 1.f);
+	base_weights.avoidance_control_scale_min = math::constrain(base_weights.avoidance_control_scale_min * guidance_quality, 0.05f, 1.f);
+	const float effective_obstacle_attention_distance = math::max(obstacle_attention_distance, 0.f) * authority_scale;
 	const matrix::Matrix<float, kControlSize, kMaxHorizon> base_ubar = _ubar;
 	bool solved = false;
 	int solved_tier = -1;
@@ -422,8 +431,8 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 			int n_vars = 0;
 			int n_constraints = 0;
 
-			if (buildQP(_xbar, _ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, Ak, Bk, _N,
-				    obstacle_attention_distance, n_vars, n_constraints)) {
+				if (buildQP(_xbar, _ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, Ak, Bk, _N,
+					    effective_obstacle_attention_distance, n_vars, n_constraints)) {
 				tier_solved = solveQP(z, n_vars, n_constraints);
 
 			} else {
@@ -673,8 +682,17 @@ void FwMpcController::ff_refs_from_nominal(const matrix::Matrix<float, kStateSiz
 		matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
 		matrix::Vector<float, kMaxHorizon> &T_ref_seq) const
 {
-	float alpha_seed = _alpha_trim;
-	float thrust_seed = _T_trim;
+	const int seed_state_idx = math::min(1, _N);
+	const float u_seed = xbar(0, seed_state_idx);
+	const float w_seed = xbar(2, seed_state_idx);
+	float alpha_seed = PX4_ISFINITE(u_seed) && PX4_ISFINITE(w_seed)
+			   ? math::constrain(atan2f(w_seed, math::max(fabsf(u_seed), 1e-3f)), -0.35f, 0.35f)
+			   : _alpha_trim;
+	float thrust_seed = math::constrain(_ubar(3, 0), _limits.u_min(3), _limits.u_max(3));
+
+	if (!PX4_ISFINITE(thrust_seed)) {
+		thrust_seed = _T_trim;
+	}
 
 	for (int k = 0; k < _N; k++) {
 		const int state_idx = math::min(k + 1, _N);
