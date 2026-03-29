@@ -242,7 +242,7 @@ private:
 
 	float getGuidanceQualityFactor(const vehicle_local_position_s &local_pos, const bool is_wind_valid) const;
 
-	float getCorrectedLateralAccelSetpoint(float lateral_accel_sp);
+	float getCorrectedLateralAccelSetpoint(float lateral_accel_sp, bool bypass_guidance_quality_limit);
 
 	void setDefaultLongitudinalControlConfiguration();
 
