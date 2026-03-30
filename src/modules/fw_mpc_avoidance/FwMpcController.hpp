@@ -53,6 +53,7 @@ public:
 		matrix::Vector4f u_max{0.1f, 0.3f, 0.1f, 24.f};
 		bool use_stage_smoothness{true};
 		bool use_rate_limits{false};
+		// Absolute per-step input delta limit applied between horizon stages.
 		matrix::Vector4f du_rate{0.15f, 0.15f, 0.15f, 0.30f};
 	};
 
@@ -80,6 +81,9 @@ public:
 		int iterations{0};
 		int status_polish{0};
 		float solve_time_us{0.f};
+		float nonlinear_min_clearance{NAN};
+		float accepted_step_scale{NAN};
+		bool full_step_rejected{false};
 	};
 
 	FwMpcController() = default;
@@ -102,10 +106,12 @@ public:
 	 * @return true if a command is available (fresh QP solve or fallback from the last successful trajectory)
 	 */
 	bool step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-		  float obstacle_attention_distance, ControlVec &u_apply, StateVec &x_next);
+		  float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next);
 
 	int last_qp_status() const { return _last_qp_status; }
 	const QpDebug &last_qp_debug() const { return _last_qp_debug; }
+	int horizon() const { return _N; }
+	const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &last_solved_state_horizon() const { return _last_solved_xbar; }
 
 	Weights &weights() { return _weights; }
 	Limits &limits() { return _limits; }
@@ -114,15 +120,27 @@ public:
 
 	const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar() const { return _ubar; }
 
-	// Tune vehicle dynamics (shared with SIH parameters)
+	// Tune legacy MPC vehicle dynamics.
 	void set_vehicle_params(float mass, const matrix::Vector3f &inertia_diag, float kdv, float kdw);
 	void set_altitude_origin_amsl(float altitude_origin_amsl) { _model.set_altitude_origin_amsl(altitude_origin_amsl); }
+	void set_wind_ned(const matrix::Vector3f &wind_ned) { _model.set_wind_ned(wind_ned); }
+	void set_guidance_quality_factor(float guidance_quality_factor)
+	{
+		_guidance_quality_factor = math::constrain(guidance_quality_factor, 0.05f, 1.f);
+	}
+	void set_robustness_margin(float robustness_margin)
+	{
+		_robustness_margin = math::max(robustness_margin, 0.f);
+	}
 
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;
 
 	StateVec fd_step(const StateVec &x0, const ControlVec &u) const;
 	void lin_fd(const StateVec &x, const ControlVec &u, StateMat &A, matrix::Matrix<float, kStateSize, kControlSize> &B) const;
+	bool solve_model_steady_reference(float V_target, float z_up, float phi_ref, float psi_ref, float gamma_ref,
+					  float alpha_seed, float thrust_seed,
+					  float &alpha_ref, float &theta_ref, float &thrust_ref) const;
 	void ff_refs_from_nominal(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 				  const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float Vc,
 				  matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
@@ -153,6 +171,14 @@ private:
 				int &row_offset, int Nz_dx, int Nz_du);
 	void addBounds(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar, int N,
 		       int &row_offset, int Nz_dx, int Nz_du, int Nz_slack);
+	void rolloutStateHorizon(const StateVec &x0, const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+				 matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar) const;
+	void rolloutAppliedStateSequence(const StateVec &x0, const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+					 matrix::Matrix<float, kStateSize, kMaxHorizon> &xapply) const;
+	bool sampleStateHorizon(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+			       float age_s, StateVec &x_sampled) const;
+	float obstacle_signed_clearance(const matrix::Vector3f &p, const Obstacle &obs, bool include_planning_margin) const;
+	float nonlinear_min_hard_clearance(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N) const;
 
 	FixedWingMpcModel _model{};
 
@@ -171,7 +197,12 @@ private:
 	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _xbar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _ubar{};
 	matrix::Matrix<float, kControlSize, kMaxHorizon> _fallback_ubar{};
+	matrix::Matrix<float, kStateSize, kMaxHorizon> _fallback_xapply{};
+	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> _last_solved_xbar{};
 	bool _have_fallback_trajectory{false};
+	float _time_since_last_solve_s{0.f};
+	float _guidance_quality_factor{1.f};
+	float _robustness_margin{0.f};
 
 	std::array<Obstacle, kMaxObstacles> _obstacles{};
 	int _n_obstacles{0};

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "FwMpcDynamics.hpp"
 #include "FwMpcController.hpp"
 
 #include <dataman_client/DatamanClient.hpp>
@@ -11,6 +10,7 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/fixed_wing_lateral_setpoint.h>
+#include <uORB/topics/fixed_wing_lateral_status.h>
 #include <uORB/topics/fixed_wing_longitudinal_setpoint.h>
 #include <uORB/topics/fw_mpc_obstacles.h>
 #include <uORB/topics/home_position.h>
@@ -19,6 +19,7 @@
 #include <uORB/topics/mpc_status.h>
 #include <uORB/topics/obstacle_position.h>
 #include <uORB/topics/parameter_update.h>
+#include <uORB/topics/airspeed_validated.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_control_mode.h>
@@ -29,7 +30,6 @@
 
 /**
  * Fixed-wing MPC avoidance prototype module.
- * Currently pass-through with an internal SIH-like dynamics model step for future rollouts.
  */
 class FwMpcAvoidance final : public ModuleBase<FwMpcAvoidance>, public ModuleParams, public px4::ScheduledWorkItem
 {
@@ -46,7 +46,10 @@ public:
 private:
 	void Run() override;
 	void parameters_update();
-	void step_internal_model(float dt);
+	void configure_controller_runtime();
+	float limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const;
+	float limit_attitude_error_for_downstream(float desired_att_sp, float current_att,
+			float time_constant_s, float max_rate_neg_rad_s, float max_rate_pos_rad_s) const;
 	float thrust_to_direct_throttle(float thrust_cmd_N) const;
 	float constrain_pitch_safety(float pitch_cmd, float vehicle_speed, float altitude_up,
 				     float pitch_min_rad, float pitch_max_rad) const;
@@ -60,6 +63,7 @@ private:
 	void publish_mission_setpoint_position(const vehicle_local_position_s *lpos,
 					      const mission_s *mission,
 					      const home_position_s *home_pos);
+	bool sample_model_prediction(float pred_age_s, float model_dt_s, FwMpcController::StateVec &x_pred) const;
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
@@ -69,19 +73,22 @@ private:
 			       float model_pred_age_s, bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value,
 			       float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
 			       float qp_active_slack_sum, int qp_iterations,
-			       float qp_solve_time_us);
+			       float qp_solve_time_us, float qp_nonlinear_min_clearance,
+			       float qp_accepted_step_scale, bool qp_full_step_rejected);
 
 	uORB::SubscriptionCallbackWorkItem _lpos_sub{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _airspeed_validated_sub{ORB_ID(airspeed_validated)};
 	uORB::Subscription _rates_sub{ORB_ID(vehicle_angular_velocity)};
-	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
 	uORB::Subscription _home_pos_sub{ORB_ID(home_position)};
 	uORB::Subscription _lpos_sp_sub{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Subscription _mission_sub{ORB_ID(mission)};
 	uORB::Subscription _fw_nominal_lon_sp_sub{ORB_ID(fixed_wing_longitudinal_setpoint)};
+	uORB::Subscription _fw_lat_status_sub{ORB_ID(fixed_wing_lateral_status)};
 	uORB::Subscription _fw_mpc_obstacles_sub{ORB_ID(fw_mpc_obstacles)};
+	uORB::Subscription _wind_sub{ORB_ID(wind)};
 
 	uORB::SubscriptionInterval _param_update_sub{ORB_ID(parameter_update), 1000000};
 
@@ -91,7 +98,6 @@ private:
 	uORB::Publication<mpc_status_s> _mpc_status_pub{ORB_ID(mpc_status)};
 
 	hrt_abstime _last_run{0};
-	FwMpcDynamics _dynamics{};
 	FwMpcController _controller{};
 	DatamanClient _dataman_client{};
 	bool _mpc_ready{false};
@@ -112,9 +118,12 @@ private:
 	bool _have_last_active_console_state{false};
 	bool _last_console_active{false};
 	bool _last_console_solve_success{false};
+	mutable bool _have_last_published_roll_sp{false};
+	mutable float _last_published_roll_sp_rad{0.f};
 	int _last_console_qp_tier{-1};
 	int _last_console_qp_status{0};
-	FwMpcController::StateVec _last_model_prediction{};
+	int _last_model_prediction_horizon_steps{0};
+	matrix::Matrix<float, FwMpcController::kStateSize, FwMpcController::kMaxHorizon + 1> _last_model_prediction_horizon{};
 	FwMpcController::Obstacle _obstacles[fw_mpc_obstacles_s::MAX_OBSTACLES]{};
 	fixed_wing_lateral_setpoint_s _last_valid_lat_sp{};
 	fixed_wing_longitudinal_setpoint_s _last_valid_lon_sp{};
@@ -146,16 +155,27 @@ private:
 		(ParamFloat<px4::params::FW_MPC_AV_TERM>) _param_fw_mpc_av_term,
 		(ParamFloat<px4::params::FW_MPC_AV_CTL>) _param_fw_mpc_av_ctl,
 		(ParamFloat<px4::params::FW_MPC_MIN_ALT>) _param_fw_mpc_min_alt,
-		(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
-		(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
-		(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
-		(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
-		(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
-		(ParamFloat<px4::params::SIH_MASS>) _param_sih_mass,
-		(ParamFloat<px4::params::SIH_IXX>) _param_sih_ixx,
-		(ParamFloat<px4::params::SIH_IYY>) _param_sih_iyy,
-		(ParamFloat<px4::params::SIH_IZZ>) _param_sih_izz,
-		(ParamFloat<px4::params::SIH_KDV>) _param_sih_kdv,
-		(ParamFloat<px4::params::SIH_KDW>) _param_sih_kdw
-	)
+		(ParamFloat<px4::params::FW_MPC_MASS>) _param_fw_mpc_mass,
+		(ParamFloat<px4::params::FW_MPC_IXX>) _param_fw_mpc_ixx,
+			(ParamFloat<px4::params::FW_MPC_IYY>) _param_fw_mpc_iyy,
+			(ParamFloat<px4::params::FW_MPC_IZZ>) _param_fw_mpc_izz,
+			(ParamFloat<px4::params::FW_MPC_KDV>) _param_fw_mpc_kdv,
+			(ParamFloat<px4::params::FW_MPC_KDW>) _param_fw_mpc_kdw,
+			(ParamFloat<px4::params::FW_R_LIM>) _param_fw_r_lim,
+			(ParamFloat<px4::params::FW_P_LIM_MIN>) _param_fw_p_lim_min,
+			(ParamFloat<px4::params::FW_P_LIM_MAX>) _param_fw_p_lim_max,
+			(ParamFloat<px4::params::FW_PN_R_SLEW_MAX>) _param_fw_pn_r_slew_max,
+			(ParamFloat<px4::params::FW_R_TC>) _param_fw_r_tc,
+			(ParamFloat<px4::params::FW_R_RMAX>) _param_fw_r_rmax,
+			(ParamFloat<px4::params::FW_P_TC>) _param_fw_p_tc,
+			(ParamFloat<px4::params::FW_P_RMAX_NEG>) _param_fw_p_rmax_neg,
+			(ParamFloat<px4::params::FW_P_RMAX_POS>) _param_fw_p_rmax_pos,
+			(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_fw_airspd_min,
+			(ParamFloat<px4::params::FW_THR_MIN>) _param_fw_thr_min,
+			(ParamFloat<px4::params::FW_MPC_RB_BASE>) _param_fw_mpc_rb_base,
+			(ParamFloat<px4::params::FW_MPC_RB_VSCL>) _param_fw_mpc_rb_vscl,
+			(ParamFloat<px4::params::FW_MPC_RB_PERR>) _param_fw_mpc_rb_perr,
+			(ParamFloat<px4::params::FW_MPC_RB_FAGE>) _param_fw_mpc_rb_fage,
+			(ParamFloat<px4::params::FW_MPC_RB_QFAC>) _param_fw_mpc_rb_qfac
+		)
 };

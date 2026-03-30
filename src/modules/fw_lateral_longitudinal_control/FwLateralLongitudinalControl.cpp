@@ -295,7 +295,7 @@ void FwLateralLongitudinalControl::Run()
 				lateral_accel_sp = 0.f; // mitigation if no valid setpoint is received: 0 lateral acceleration
 			}
 
-			lateral_accel_sp = getCorrectedLateralAccelSetpoint(lateral_accel_sp);
+			lateral_accel_sp = getCorrectedLateralAccelSetpoint(lateral_accel_sp, mpc_active);
 			lateral_accel_sp = math::constrain(lateral_accel_sp, -_lateral_configuration.lateral_accel_max,
 							   _lateral_configuration.lateral_accel_max);
 			roll_sp = mapLateralAccelerationToRollAngle(lateral_accel_sp);
@@ -751,12 +751,22 @@ float FwLateralLongitudinalControl::getGuidanceQualityFactor(const vehicle_local
 
 	return flying_forward_factor * low_ground_speed_factor;
 }
-float FwLateralLongitudinalControl::getCorrectedLateralAccelSetpoint(float lateral_accel_sp)
+float FwLateralLongitudinalControl::getCorrectedLateralAccelSetpoint(float lateral_accel_sp,
+		bool bypass_guidance_quality_limit)
 {
+	hrt_abstime now{hrt_absolute_time()};
+
+	if (bypass_guidance_quality_limit) {
+		// Direct MPC commands should not be attenuated by NPFG guidance-quality gating.
+		_can_run_factor = 1.f;
+		_need_report_npfg_uncertain_condition = true;
+		_time_since_first_reduced_roll = 0U;
+		_time_since_last_npfg_call = now;
+		return lateral_accel_sp;
+	}
+
 	// Scale the npfg output to zero if npfg is not certain for correct output
 	_can_run_factor = math::constrain(getGuidanceQualityFactor(_local_pos, _wind_valid), 0.f, 1.f);
-
-	hrt_abstime now{hrt_absolute_time()};
 
 	// Warn the user when the scale is less than 90% for at least 2 seconds (disable in transition)
 

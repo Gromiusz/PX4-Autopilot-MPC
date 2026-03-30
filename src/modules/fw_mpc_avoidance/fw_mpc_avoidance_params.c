@@ -41,7 +41,7 @@ PARAM_DEFINE_INT32(FW_MPC_HORIZON, 64);
 /**
  * Internal MPC model integration step [s].
  *
- * Sets the integration step used by the internal SIH-like model during rollouts.
+ * Sets the integration step used by the internal legacy MPC model during rollouts.
  *
  * @unit s
  * @min 0.005
@@ -211,7 +211,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_OBS_CD, 20.0f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.10f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.40f);
 
 /**
  * Minimum terminal waypoint tracking scale during strong avoidance.
@@ -224,7 +224,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_TRK, 0.10f);
  * @decimal 2
  * @group FW MPC Avoidance
  */
-PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.05f);
+PARAM_DEFINE_FLOAT(FW_MPC_AV_TERM, 0.25f);
 
 /**
  * Minimum control penalty scale during strong avoidance.
@@ -252,3 +252,159 @@ PARAM_DEFINE_FLOAT(FW_MPC_AV_CTL, 0.25f);
  * @group FW MPC Avoidance
  */
 PARAM_DEFINE_FLOAT(FW_MPC_MIN_ALT, 10.0f);
+
+/**
+ * Legacy MPC model mass.
+ *
+ * Mass used by the internal full-state MPC model. This is intentionally
+ * separate from SIH_* so the avoidance model can be tuned independently of
+ * simulator_sih.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg
+ * @min 0.1
+ * @max 50.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_MASS, 1.0f);
+
+/**
+ * Legacy MPC model inertia Ixx.
+ *
+ * Roll-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IXX, 0.197563f);
+
+/**
+ * Legacy MPC model inertia Iyy.
+ *
+ * Pitch-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IYY, 0.1458929f);
+
+/**
+ * Legacy MPC model inertia Izz.
+ *
+ * Yaw-axis inertia used by the internal full-state MPC model.
+ *
+ * Defaults are aligned with the Gazebo advanced_plane model.
+ *
+ * @unit kg m^2
+ * @min 0.0001
+ * @max 10.0
+ * @decimal 6
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_IZZ, 0.1477f);
+
+/**
+ * Legacy MPC model linear damping gain.
+ *
+ * Damping gain passed to the internal aerodynamic model for lateral/vertical
+ * velocity damping.
+ *
+ * @min 0.0
+ * @max 20.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_KDV, 1.0f);
+
+/**
+ * Legacy MPC model angular damping gain.
+ *
+ * Damping gain passed to the internal aerodynamic model for angular-rate
+ * damping.
+ *
+ * @min 0.0
+ * @max 5.0
+ * @decimal 4
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_KDW, 0.025f);
+
+/**
+ * Base robust obstacle inflation margin.
+ *
+ * Additional margin applied to both hard and soft obstacle constraints to
+ * compensate for model mismatch and tracking uncertainty.
+ *
+ * @unit m
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_BASE, 0.25f);
+
+/**
+ * Robust margin gain on airspeed.
+ *
+ * Additional obstacle inflation proportional to current true airspeed.
+ *
+ * @unit s
+ * @min 0.0
+ * @max 1.0
+ * @decimal 3
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_VSCL, 0.02f);
+
+/**
+ * Robust margin gain on model position error.
+ *
+ * Additional obstacle inflation proportional to the observed model prediction
+ * position error.
+ *
+ * @min 0.0
+ * @max 5.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_PERR, 0.25f);
+
+/**
+ * Robust margin gain on prediction age / fallback age.
+ *
+ * Additional obstacle inflation proportional to the age of the last accepted
+ * model prediction.
+ *
+ * @unit m/s
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_FAGE, 0.75f);
+
+/**
+ * Robust margin gain on guidance quality loss.
+ *
+ * Additional obstacle inflation proportional to loss of downstream guidance
+ * authority, expressed as (1 - can_run_factor).
+ *
+ * @unit m
+ * @min 0.0
+ * @max 20.0
+ * @decimal 2
+ * @group FW MPC Avoidance
+ */
+PARAM_DEFINE_FLOAT(FW_MPC_RB_QFAC, 1.50f);

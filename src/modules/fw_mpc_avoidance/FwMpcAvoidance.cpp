@@ -34,27 +34,72 @@ bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float cle
 }
 } // namespace
 
-const matrix::Vector3f FwMpcDynamics::_I_diag{0.02f, 0.02f, 0.04f};
-const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I = matrix::diag(FwMpcDynamics::_I_diag);
-const matrix::SquareMatrix<float, 3> FwMpcDynamics::_I_inv = matrix::diag(matrix::Vector3f{1.f / 0.02f, 1.f / 0.02f, 1.f / 0.04f});
-
 FwMpcAvoidance::FwMpcAvoidance() :
 	ModuleParams(nullptr),
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
 {
 }
 
-bool FwMpcAvoidance::init()
+void FwMpcAvoidance::configure_controller_runtime()
 {
-	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
-	_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon);
-	const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
-	_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
+	const matrix::Vector3f I_diag{_param_fw_mpc_ixx.get(), _param_fw_mpc_iyy.get(), _param_fw_mpc_izz.get()};
+	_controller.set_vehicle_params(_param_fw_mpc_mass.get(), I_diag, _param_fw_mpc_kdv.get(), _param_fw_mpc_kdw.get());
 	_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
 	_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
 	_controller.weights().avoidance_tracking_scale_min = math::constrain(_param_fw_mpc_av_trk.get(), 0.05f, 1.f);
 	_controller.weights().avoidance_terminal_scale_min = math::constrain(_param_fw_mpc_av_term.get(), 0.02f, 1.f);
 	_controller.weights().avoidance_control_scale_min = math::constrain(_param_fw_mpc_av_ctl.get(), 0.05f, 1.f);
+	// Do not impose extra slew on the internal legacy MPC control space here.
+	// The only hard limits we trust from downstream are applied on published
+	// attitude/lateral setpoints via FW_R_LIM, FW_P_LIM_MIN/MAX and can_run_factor.
+	_controller.limits().use_rate_limits = false;
+}
+
+float FwMpcAvoidance::limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const
+{
+	const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+	float limited_roll_sp = math::constrain(desired_roll_sp, -roll_lim_rad, roll_lim_rad);
+
+	if (!_have_last_published_roll_sp || dt_s <= 1e-4f) {
+		return limited_roll_sp;
+	}
+
+	const float max_slew_rad_s = math::radians(math::max(_param_fw_pn_r_slew_max.get(), 0.f));
+
+	if (max_slew_rad_s <= 1e-4f) {
+		return limited_roll_sp;
+	}
+
+	const float max_delta = max_slew_rad_s * dt_s;
+	const float delta = math::constrain(limited_roll_sp - _last_published_roll_sp_rad, -max_delta, max_delta);
+	return math::constrain(_last_published_roll_sp_rad + delta, -roll_lim_rad, roll_lim_rad);
+}
+
+float FwMpcAvoidance::limit_attitude_error_for_downstream(float desired_att_sp, float current_att,
+		float time_constant_s, float max_rate_neg_rad_s, float max_rate_pos_rad_s) const
+{
+	if (!PX4_ISFINITE(desired_att_sp) || !PX4_ISFINITE(current_att)) {
+		return desired_att_sp;
+	}
+
+	time_constant_s = math::max(time_constant_s, 0.f);
+	max_rate_neg_rad_s = math::max(max_rate_neg_rad_s, 0.f);
+	max_rate_pos_rad_s = math::max(max_rate_pos_rad_s, 0.f);
+
+	if (time_constant_s <= 1e-4f || (max_rate_neg_rad_s <= 1e-4f && max_rate_pos_rad_s <= 1e-4f)) {
+		return desired_att_sp;
+	}
+
+	const float max_neg_error = max_rate_neg_rad_s * time_constant_s;
+	const float max_pos_error = max_rate_pos_rad_s * time_constant_s;
+	return math::constrain(desired_att_sp, current_att - max_neg_error, current_att + max_pos_error);
+}
+
+bool FwMpcAvoidance::init()
+{
+	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
+	_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon);
+	configure_controller_runtime();
 
 	if (!_lpos_sub.registerCallback()) {
 		PX4_ERR("vehicle_local_position callback registration failed");
@@ -82,36 +127,8 @@ void FwMpcAvoidance::parameters_update()
 			PX4_ERR("fw mpc config failed");
 		}
 
-		const matrix::Vector3f I_diag{_param_sih_ixx.get(), _param_sih_iyy.get(), _param_sih_izz.get()};
-		_controller.set_vehicle_params(_param_sih_mass.get(), I_diag, _param_sih_kdv.get(), _param_sih_kdw.get());
-		_controller.weights().obstacle_proximity_weight = math::max(_param_fw_mpc_obs_cw.get(), 0.f);
-		_controller.weights().obstacle_proximity_distance = math::max(_param_fw_mpc_obs_cd.get(), 0.f);
-		_controller.weights().avoidance_tracking_scale_min = math::constrain(_param_fw_mpc_av_trk.get(), 0.05f, 1.f);
-		_controller.weights().avoidance_terminal_scale_min = math::constrain(_param_fw_mpc_av_term.get(), 0.02f, 1.f);
-		_controller.weights().avoidance_control_scale_min = math::constrain(_param_fw_mpc_av_ctl.get(), 0.05f, 1.f);
+		configure_controller_runtime();
 	}
-}
-
-void FwMpcAvoidance::step_internal_model(const float dt)
-{
-	vehicle_attitude_s att{};
-	vehicle_angular_velocity_s rates{};
-	vehicle_local_position_s lpos{};
-	wind_s wind{};
-
-	if (_att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos)) {
-		FwMpcDynamics::State s{};
-		s.q_nb = Quatf(att.q);
-		s.omega_B = Vector3f{rates.xyz[0], rates.xyz[1], rates.xyz[2]};
-		s.velocity_N = Vector3f{lpos.vx, lpos.vy, lpos.vz};
-		s.position_N = Vector3f{lpos.x, lpos.y, lpos.z};
-		_dynamics.reset(s);
-	}
-
-	_wind_sub.copy(&wind);
-	Vector3f wind_B{wind.windspeed_north, wind.windspeed_east, 0.0f};
-	// In absence of MPC solution, use zero moments and zero thrust; this keeps state integration bounded.
-	_dynamics.propagate(Vector3f{}, Vector3f{}, wind_B, dt);
 }
 
 float FwMpcAvoidance::thrust_to_direct_throttle(float thrust_cmd_N) const
@@ -152,6 +169,37 @@ float FwMpcAvoidance::constrain_pitch_safety(float pitch_cmd, float vehicle_spee
 	}
 
 	return math::constrain(pitch_cmd, safe_pitch_min, safe_pitch_max);
+}
+
+bool FwMpcAvoidance::sample_model_prediction(float pred_age_s, float model_dt_s,
+		FwMpcController::StateVec &x_pred) const
+{
+	if (!_have_last_model_prediction || _last_model_prediction_horizon_steps < 1 || model_dt_s <= 1e-3f) {
+		return false;
+	}
+
+	const float max_age_s = (_last_model_prediction_horizon_steps + 0.5f) * model_dt_s;
+
+	if (pred_age_s < 0.5f * model_dt_s || pred_age_s > max_age_s) {
+		return false;
+	}
+
+	const float step_pos = math::constrain(pred_age_s / model_dt_s, 0.f, static_cast<float>(_last_model_prediction_horizon_steps));
+	const int idx0 = math::constrain(static_cast<int>(floorf(step_pos)), 0, _last_model_prediction_horizon_steps);
+	const int idx1 = math::min(idx0 + 1, _last_model_prediction_horizon_steps);
+	const float alpha = math::constrain(step_pos - static_cast<float>(idx0), 0.f, 1.f);
+	const FwMpcController::StateVec x0 = _last_model_prediction_horizon.col(idx0);
+	const FwMpcController::StateVec x1 = _last_model_prediction_horizon.col(idx1);
+
+	for (int i = 0; i < FwMpcController::kStateSize; i++) {
+		x_pred(i) = x0(i) + alpha * (x1(i) - x0(i));
+	}
+
+	for (int i = 6; i <= 8; i++) {
+		x_pred(i) = matrix::wrap_pi(x0(i) + alpha * matrix::wrap_pi(x1(i) - x0(i)));
+	}
+
+	return true;
 }
 
 void FwMpcAvoidance::publish_obstacle_position()
@@ -478,7 +526,8 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 					float model_pred_vel_error, float model_pred_att_error, float model_pred_age_s,
 					bool solve_success, int qp_tier_used, int qp_status_polish, float objective_value, float qp_primal_residual,
 					float qp_dual_residual, float qp_active_slack_max, float qp_active_slack_sum,
-					int qp_iterations, float qp_solve_time_us)
+					int qp_iterations, float qp_solve_time_us, float qp_nonlinear_min_clearance,
+					float qp_accepted_step_scale, bool qp_full_step_rejected)
 {
 	mpc_status_s status{};
 	status.timestamp = hrt_absolute_time();
@@ -507,6 +556,9 @@ void FwMpcAvoidance::publish_mpc_status(bool mpc_allowed, bool mpc_active, bool 
 	status.qp_iterations = qp_iterations;
 	status.qp_solve_time_us = qp_solve_time_us;
 	status.last_qp_status = qp_status;
+	status.qp_nonlinear_min_clearance = qp_nonlinear_min_clearance;
+	status.qp_accepted_step_scale = qp_accepted_step_scale;
+	status.qp_full_step_rejected = qp_full_step_rejected;
 	_mpc_status_pub.publish(status);
 }
 
@@ -665,16 +717,21 @@ void FwMpcAvoidance::Run()
 		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
 		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
 		vehicle_speed = vel_N.norm();
+		fixed_wing_lateral_status_s fw_lat_status{};
+		const hrt_abstime lateral_status_timeout_us = 500000;
+		const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
+					 && PX4_ISFINITE(fw_lat_status.can_run_factor)
+					 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
+		const float can_run_factor = lateral_status_valid
+					    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
+					    : 1.f;
 		const bool trigger_now = have_state && have_goal
 				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance, nearest_obstacle_index);
 		obstacle_triggered = trigger_now;
 
 		if (trigger_now) {
-			_time_last_obstacle_trigger = now;
-		}
-
-		if (trigger_now) {
 			mpc_active_now = true;
+			_time_last_obstacle_trigger = now;
 
 		} else if (_mpc_active_last && obstacle_data_fresh && have_state && have_goal) {
 			const float exit_hysteresis = math::max(_param_fw_mpc_act_hys.get(), 0.f);
@@ -690,17 +747,42 @@ void FwMpcAvoidance::Run()
 			_mpc_ready = false;
 			_have_last_valid_mpc_setpoint = false;
 			_have_last_model_prediction = false;
+			_last_model_prediction_horizon_steps = 0;
 		}
 
 		if (mpc_active_now && have_state && have_goal) {
 			const matrix::Quatf q(att.q);
 			const matrix::Dcmf R_nb{q};
-			const matrix::Vector3f vel_B = R_nb.transpose() * vel_N;
 			const matrix::Eulerf euler(q);
+			airspeed_validated_s airspeed_validated{};
+			const bool airspeed_valid = _airspeed_validated_sub.copy(&airspeed_validated)
+						   && PX4_ISFINITE(airspeed_validated.calibrated_airspeed_m_s)
+						   && PX4_ISFINITE(airspeed_validated.true_airspeed_m_s)
+						   && airspeed_validated.airspeed_source != airspeed_validated_s::SOURCE_SYNTHETIC
+						   && hrt_elapsed_time(&airspeed_validated.timestamp) <= 1_s;
+			wind_s wind{};
+			const bool wind_valid = _wind_sub.copy(&wind)
+						&& PX4_ISFINITE(wind.windspeed_north)
+						&& PX4_ISFINITE(wind.windspeed_east)
+						&& hrt_elapsed_time(&wind.timestamp) <= 1_s;
+			const matrix::Vector3f wind_N = wind_valid ? matrix::Vector3f{wind.windspeed_north, wind.windspeed_east, 0.f}
+						 : matrix::Vector3f{};
+			const matrix::Vector3f vel_air_N = vel_N - wind_N;
+			const matrix::Vector3f vel_B = R_nb.transpose() * vel_air_N;
+			const float vehicle_airspeed_tas = vel_air_N.norm();
+			const float vehicle_airspeed_cas = airspeed_valid ? math::max(0.5f, airspeed_validated.calibrated_airspeed_m_s)
+							 : vehicle_airspeed_tas;
+			const float vehicle_airspeed_ref = airspeed_valid ? math::max(0.5f, airspeed_validated.true_airspeed_m_s)
+							 : vehicle_airspeed_tas;
+			const float eas2tas = (airspeed_valid && vehicle_airspeed_cas > 0.5f)
+					      ? math::constrain(airspeed_validated.true_airspeed_m_s / vehicle_airspeed_cas, 0.9f, 2.0f)
+					      : 1.f;
 
 			if (lpos.z_global && PX4_ISFINITE(lpos.ref_alt)) {
 				_controller.set_altitude_origin_amsl(lpos.ref_alt);
 			}
+
+			_controller.set_wind_ned(wind_N);
 
 			FwMpcController::StateVec x_now{};
 			x_now(0) = vel_B(0);
@@ -719,53 +801,89 @@ void FwMpcAvoidance::Run()
 			if (_have_last_model_prediction) {
 				const float pred_age_s = (now - _time_last_model_prediction) * 1e-6f;
 				const float model_dt_s = math::max(_param_fw_mpc_avoid_dt.get(), 1e-3f);
+				FwMpcController::StateVec x_pred_ref{};
 
-				if (pred_age_s >= 0.5f * model_dt_s && pred_age_s <= 2.f * model_dt_s) {
+				if (sample_model_prediction(pred_age_s, model_dt_s, x_pred_ref)) {
 					model_pred_age_s = pred_age_s;
 
 					const Vector3f pos_now{x_now(9), x_now(10), x_now(11)};
-					const Vector3f pos_pred{_last_model_prediction(9), _last_model_prediction(10), _last_model_prediction(11)};
+					const Vector3f pos_pred{x_pred_ref(9), x_pred_ref(10), x_pred_ref(11)};
 					model_pred_pos_error = (pos_now - pos_pred).norm();
 
 					const Vector3f vel_now{x_now(0), x_now(1), x_now(2)};
-					const Vector3f vel_pred{_last_model_prediction(0), _last_model_prediction(1), _last_model_prediction(2)};
+					const Vector3f vel_pred{x_pred_ref(0), x_pred_ref(1), x_pred_ref(2)};
 					model_pred_vel_error = (vel_now - vel_pred).norm();
 
-					const float dphi = matrix::wrap_pi(x_now(6) - _last_model_prediction(6));
-					const float dtheta = matrix::wrap_pi(x_now(7) - _last_model_prediction(7));
-					const float dpsi = matrix::wrap_pi(x_now(8) - _last_model_prediction(8));
+					const float dphi = matrix::wrap_pi(x_now(6) - x_pred_ref(6));
+					const float dtheta = matrix::wrap_pi(x_now(7) - x_pred_ref(7));
+					const float dpsi = matrix::wrap_pi(x_now(8) - x_pred_ref(8));
 					model_pred_att_error = sqrtf(dphi * dphi + dtheta * dtheta + dpsi * dpsi);
 				}
 			}
 
 			const matrix::Vector3f goal_up{lpos_sp.x, lpos_sp.y, -lpos_sp.z};
+			const bool have_nominal_airspeed = have_nominal_lon
+						 && PX4_ISFINITE(nominal_lon_sp.equivalent_airspeed)
+						 && nominal_lon_sp.equivalent_airspeed > 1.f;
+			const float V_cruise = have_nominal_airspeed
+					       ? math::max(nominal_lon_sp.equivalent_airspeed * eas2tas, 8.f)
+					       : math::max(vehicle_airspeed_ref, 8.f);
 
 			if (!_mpc_ready) {
-				_controller.initTrim(13.f, x_now(11), goal_up);
+				_controller.initTrim(V_cruise, x_now(11), goal_up);
 				_mpc_ready = true;
 			}
 
+			_controller.set_guidance_quality_factor(can_run_factor);
+			const float model_pos_error_term = PX4_ISFINITE(model_pred_pos_error) ? math::max(model_pred_pos_error, 0.f) : 0.f;
+			const float prediction_age_term = PX4_ISFINITE(model_pred_age_s) ? math::max(model_pred_age_s, 0.f) : 0.f;
+			const float robust_margin = math::constrain(
+							 math::max(_param_fw_mpc_rb_base.get(), 0.f)
+							 + math::max(_param_fw_mpc_rb_vscl.get(), 0.f) * math::max(vehicle_airspeed_ref, 0.f)
+							 + math::max(_param_fw_mpc_rb_perr.get(), 0.f) * model_pos_error_term
+							 + math::max(_param_fw_mpc_rb_fage.get(), 0.f) * prediction_age_term
+							 + math::max(_param_fw_mpc_rb_qfac.get(), 0.f) * math::max(1.f - can_run_factor, 0.f),
+							 0.f, 20.f);
+			_controller.set_robustness_margin(robust_margin);
 			FwMpcController::ControlVec u_cmd{};
 			FwMpcController::StateVec x_pred{};
-			const float V_cruise = math::max(vel_N.norm(), 8.f);
 			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
-			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, u_cmd, x_pred);
+			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, dt, u_cmd, x_pred);
 			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
 
 			if (have_mpc_command) {
-				const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
-				const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
-				const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
-				const float phi_cmd = math::constrain(x_pred(6), -roll_lim_rad, roll_lim_rad);
-				const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
-				const float theta_cmd = constrain_pitch_safety(theta_cmd_raw, vehicle_speed, x_now(11),
-						      pitch_min_rad, pitch_max_rad);
-				float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd);
-				lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
+					const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+					const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
+					const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
+					const float roll_rate_rad_s = math::radians(math::max(_param_fw_r_rmax.get(), 0.f));
+					const float pitch_rate_neg_rad_s = math::radians(math::max(_param_fw_p_rmax_neg.get(), 0.f));
+					const float pitch_rate_pos_rad_s = math::radians(math::max(_param_fw_p_rmax_pos.get(), 0.f));
+					const float phi_cmd_slewed = limit_roll_setpoint_for_downstream(x_pred(6), dt);
+					const float phi_cmd = limit_attitude_error_for_downstream(phi_cmd_slewed, x_now(6),
+							     _param_fw_r_tc.get(), roll_rate_rad_s, roll_rate_rad_s);
+					const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
+					const float theta_cmd_dyn = limit_attitude_error_for_downstream(theta_cmd_raw, x_now(7),
+							      _param_fw_p_tc.get(), pitch_rate_neg_rad_s, pitch_rate_pos_rad_s);
+					const float theta_cmd = constrain_pitch_safety(theta_cmd_dyn, vehicle_airspeed_cas, x_now(11),
+							      pitch_min_rad, pitch_max_rad);
+					float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd) / can_run_factor;
+					lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
+					const float lateral_accel_pub_lim = CONSTANTS_ONE_G * tanf(roll_lim_rad) / can_run_factor;
+					lateral_accel_cmd = math::constrain(lateral_accel_cmd,
+									  -lateral_accel_pub_lim,
+									  lateral_accel_pub_lim);
+					const matrix::Quatf q_pred(matrix::Eulerf(x_pred(6), x_pred(7), x_pred(8)));
+					const matrix::Dcmf R_nb_pred{q_pred};
+					const Vector3f v_air_pred_B{x_pred(0), x_pred(1), x_pred(2)};
+				const Vector3f v_air_pred_N = R_nb_pred * v_air_pred_B;
+				const Vector2f v_air_pred_xy{v_air_pred_N(0), v_air_pred_N(1)};
+				const float airspeed_direction_cmd = (v_air_pred_xy.norm() > 2.f)
+								     ? atan2f(v_air_pred_xy(1), v_air_pred_xy(0))
+								     : NAN;
 
 				lat_sp.timestamp = now;
 				lat_sp.course = NAN;
-				lat_sp.airspeed_direction = NAN;
+				lat_sp.airspeed_direction = airspeed_direction_cmd;
 				lat_sp.lateral_acceleration = lateral_accel_cmd;
 
 				if (have_nominal_lon) {
@@ -790,7 +908,8 @@ void FwMpcAvoidance::Run()
 					_last_valid_lon_sp = lon_sp;
 					_time_last_valid_mpc_setpoint = now;
 					_have_last_valid_mpc_setpoint = true;
-					_last_model_prediction = x_pred;
+					_last_model_prediction_horizon = _controller.last_solved_state_horizon();
+					_last_model_prediction_horizon_steps = _controller.horizon();
 					_time_last_model_prediction = now;
 					_have_last_model_prediction = true;
 				}
@@ -810,14 +929,13 @@ void FwMpcAvoidance::Run()
 				}
 			}
 
-		} else if (have_state) {
-			// Fallback: integrate internal model to keep nominal state bounded.
-			step_internal_model(math::max(dt, _param_fw_mpc_avoid_dt.get()));
+			}
 		}
-	}
 
 	if (!mpc_active_now) {
 		_have_last_model_prediction = false;
+		_last_model_prediction_horizon_steps = 0;
+		_have_last_published_roll_sp = false;
 	}
 
 	_mpc_active_last = mpc_active_now;
@@ -834,9 +952,17 @@ void FwMpcAvoidance::Run()
 			   qp_debug.solve_tier_used,
 			   qp_debug.status_polish, qp_debug.objective_value, qp_debug.primal_residual,
 			   qp_debug.dual_residual, qp_debug.active_slack_max, qp_debug.active_slack_sum,
-			   qp_debug.iterations, qp_debug.solve_time_us);
+			   qp_debug.iterations, qp_debug.solve_time_us, qp_debug.nonlinear_min_clearance,
+			   qp_debug.accepted_step_scale, qp_debug.full_step_rejected);
 
 	if (have_lat) {
+		if (mpc_active_now && PX4_ISFINITE(lat_sp.lateral_acceleration)) {
+			const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+			_last_published_roll_sp_rad = math::constrain(atanf(lat_sp.lateral_acceleration / CONSTANTS_ONE_G),
+						      -roll_lim_rad, roll_lim_rad);
+			_have_last_published_roll_sp = true;
+		}
+
 		_lat_sp_pub.publish(lat_sp);
 	}
 

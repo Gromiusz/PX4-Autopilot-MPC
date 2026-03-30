@@ -2507,14 +2507,24 @@ MavlinkReceiver::handle_message_fw_mpc_obstacles(mavlink_message_t *msg)
 	fw_mpc_obstacles_s obstacles{};
 	obstacles.timestamp = hrt_absolute_time();
 	obstacles.frame = obstacles_msg.frame;
-	obstacles.count = obstacles_msg.count;
 
-	memcpy(obstacles.x, obstacles_msg.x, sizeof(obstacles.x));
-	memcpy(obstacles.y, obstacles_msg.y, sizeof(obstacles.y));
-	memcpy(obstacles.z, obstacles_msg.z, sizeof(obstacles.z));
-	memcpy(obstacles.radius, obstacles_msg.radius, sizeof(obstacles.radius));
-	memcpy(obstacles.height, obstacles_msg.height, sizeof(obstacles.height));
-	memcpy(obstacles.margin, obstacles_msg.margin, sizeof(obstacles.margin));
+	// The local uORB topic can hold more obstacles than the MAVLink packet.
+	constexpr uint8_t kMavlinkObstacleArraySize = sizeof(obstacles_msg.x) / sizeof(obstacles_msg.x[0]);
+	const uint8_t count = math::min(obstacles_msg.count,
+					math::min(static_cast<uint8_t>(fw_mpc_obstacles_s::MAX_OBSTACLES), kMavlinkObstacleArraySize));
+	obstacles.count = count;
+
+	for (uint8_t i = 0; i < count; i++) {
+		obstacles.x[i] = obstacles_msg.x[i];
+		obstacles.y[i] = obstacles_msg.y[i];
+		obstacles.z[i] = obstacles_msg.z[i];
+		obstacles.size_x[i] = NAN;
+		obstacles.size_y[i] = NAN;
+		obstacles.size_z[i] = NAN;
+		obstacles.radius[i] = obstacles_msg.radius[i];
+		obstacles.height[i] = obstacles_msg.height[i];
+		obstacles.margin[i] = obstacles_msg.margin[i];
+	}
 
 	_fw_mpc_obstacles_pub.publish(obstacles);
 }

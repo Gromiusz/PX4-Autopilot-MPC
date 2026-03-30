@@ -29,3 +29,7 @@ int32 qp_iterations
 float32 qp_solve_time_us
 
 int32 last_qp_status
+float32 qp_nonlinear_min_clearance
+float32 qp_accepted_step_scale
+bool qp_full_step_rejected
+uint8[3] padding2
