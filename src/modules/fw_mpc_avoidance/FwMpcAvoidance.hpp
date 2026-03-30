@@ -44,8 +44,51 @@ public:
 	bool init();
 
 private:
+	struct MpcStateInputs {
+		vehicle_attitude_s att{};
+		vehicle_angular_velocity_s rates{};
+		vehicle_local_position_s lpos{};
+		matrix::Vector3f vel_ned{};
+		float vehicle_speed{0.f};
+		float can_run_factor{1.f};
+		bool have_state{false};
+	};
+
+	struct MpcStepContext {
+		FwMpcController::StateVec x_now{};
+		matrix::Vector3f goal_up{};
+		float vehicle_airspeed_cas{0.f};
+		float vehicle_airspeed_ref{0.f};
+		float cruise_airspeed{0.f};
+	};
+
+	struct MpcRunTelemetry {
+		float nearest_obstacle_distance{0.f};
+		float trigger_distance{0.f};
+		int nearest_obstacle_index{-1};
+		float vehicle_speed{0.f};
+		float model_pred_pos_error{0.f};
+		float model_pred_vel_error{0.f};
+		float model_pred_att_error{0.f};
+		float model_pred_age_s{0.f};
+		bool obstacle_triggered{false};
+		bool emergency_turn_active{false};
+		bool mpc_active_now{false};
+	};
+
+	struct PublishedSetpoints {
+		fixed_wing_lateral_setpoint_s lat{};
+		fixed_wing_longitudinal_setpoint_s lon{};
+		bool have_lat{false};
+		bool have_lon{false};
+	};
+
 	void Run() override;
 	void parameters_update();
+	bool configure_controller_from_params();
+	bool poll_obstacle_updates();
+	void refresh_auxiliary_publications();
+	void update_run_timing(hrt_abstime &now, float &dt);
 	void configure_controller_runtime();
 	float limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const;
 	float limit_attitude_error_for_downstream(float desired_att_sp, float current_att,
@@ -67,6 +110,33 @@ private:
 	bool should_allow_mpc(const vehicle_status_s &status, const vehicle_control_mode_s &control_mode) const;
 	bool should_activate_mpc(const vehicle_local_position_s &lpos, const matrix::Vector3f &vel_ned,
 				 float &nearest_distance, float &trigger_distance, int &nearest_obstacle_index) const;
+	bool compute_mpc_allowed(bool &obstacle_data_fresh);
+	MpcStateInputs collect_mpc_state_inputs();
+	void update_mpc_activation_state(const MpcStateInputs &inputs, bool have_goal, bool obstacle_data_fresh,
+			hrt_abstime now, MpcRunTelemetry &telemetry);
+	void update_prediction_error_metrics(const FwMpcController::StateVec &x_now, hrt_abstime now,
+			MpcRunTelemetry &telemetry) const;
+	void build_mpc_step_context(const MpcStateInputs &inputs, const vehicle_local_position_setpoint_s &lpos_sp,
+			const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp, bool have_nominal_lon, hrt_abstime now,
+			MpcRunTelemetry &telemetry, MpcStepContext &context);
+	void run_active_mpc(const MpcStateInputs &inputs, const MpcStepContext &context, hrt_abstime now, float dt,
+			const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp, bool have_nominal_lon,
+			const MpcRunTelemetry &telemetry, PublishedSetpoints &setpoints);
+	void fill_setpoints_from_mpc_command(const MpcStateInputs &inputs, const MpcStepContext &context,
+			const FwMpcController::ControlVec &u_cmd, const FwMpcController::StateVec &x_pred, hrt_abstime now, float dt,
+			const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp, bool have_nominal_lon,
+			PublishedSetpoints &setpoints) const;
+	void update_cached_mpc_solution(const FwMpcController::QpDebug &qp_debug, const PublishedSetpoints &setpoints,
+			hrt_abstime now);
+	void maybe_use_last_valid_mpc_setpoints(hrt_abstime now, PublishedSetpoints &setpoints) const;
+	void reset_inactive_mpc_state();
+	bool should_publish_mission_setpoint_on_local_ref_change(const vehicle_local_position_s *lpos) const;
+	bool should_publish_mission_setpoint_on_home_update(const home_position_s *home_pos) const;
+	void publish_obstacle_position_if_requested(bool publish_requested);
+	void publish_mission_setpoint_position_if_requested(bool publish_requested, const vehicle_local_position_s *lpos,
+			const mission_s *mission, const home_position_s *home_pos);
+	void finalize_run_cycle(hrt_abstime now, bool mpc_allowed, bool obstacle_data_fresh,
+			const MpcRunTelemetry &telemetry, const PublishedSetpoints &setpoints);
 	void publish_mpc_status(bool mpc_allowed, bool mpc_active, bool obstacle_data_fresh, bool obstacle_triggered,
 			       bool emergency_turn_active, int nearest_obstacle_index, float nearest_distance, float trigger_distance, float vehicle_speed,
 			       int qp_status, float model_pred_pos_error, float model_pred_vel_error, float model_pred_att_error,

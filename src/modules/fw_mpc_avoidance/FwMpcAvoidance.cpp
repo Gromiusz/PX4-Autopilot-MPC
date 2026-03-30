@@ -20,9 +20,8 @@ using matrix::Quatf;
 using matrix::Vector2f;
 using matrix::Vector3f;
 
-namespace
-{
-bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float clearance)
+
+static bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float clearance)
 {
 	const float speed_xy = vel_xy.norm();
 
@@ -32,7 +31,6 @@ bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float cle
 
 	return rel_xy.dot(vel_xy / speed_xy) > -math::max(clearance, 0.f);
 }
-} // namespace
 
 FwMpcAvoidance::FwMpcAvoidance() :
 	ModuleParams(nullptr),
@@ -53,6 +51,16 @@ void FwMpcAvoidance::configure_controller_runtime()
 	// The only hard limits we trust from downstream are applied on published
 	// attitude/lateral setpoints via FW_R_LIM, FW_P_LIM_MIN/MAX and can_run_factor.
 	_controller.limits().use_rate_limits = false;
+}
+
+bool FwMpcAvoidance::configure_controller_from_params()
+{
+	if (!_controller.configure(_param_fw_mpc_avoid_dt.get(), _param_fw_mpc_horizon.get())) {
+		PX4_ERR("fw mpc config failed");
+		return false;
+	}
+
+	return true;
 }
 
 float FwMpcAvoidance::limit_roll_setpoint_for_downstream(float desired_roll_sp, float dt_s) const
@@ -97,8 +105,10 @@ float FwMpcAvoidance::limit_attitude_error_for_downstream(float desired_att_sp, 
 
 bool FwMpcAvoidance::init()
 {
-	const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
-	_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon);
+	if (!configure_controller_from_params()) {
+		return false;
+	}
+
 	configure_controller_runtime();
 
 	if (!_lpos_sub.registerCallback()) {
@@ -118,17 +128,105 @@ void FwMpcAvoidance::parameters_update()
 		_param_update_sub.copy(&p);
 		updateParams();
 
-		const int horizon = math::constrain(_param_fw_mpc_horizon.get(), 2, FwMpcController::kMaxHorizon);
-
-		if (_controller.configure(_param_fw_mpc_avoid_dt.get(), horizon)) {
+		if (configure_controller_from_params()) {
 			_mpc_ready = false;
-
-		} else {
-			PX4_ERR("fw mpc config failed");
 		}
 
 		configure_controller_runtime();
 	}
+}
+
+bool FwMpcAvoidance::poll_obstacle_updates()
+{
+	fw_mpc_obstacles_s obstacles_msg{};
+
+	if (!_fw_mpc_obstacles_sub.update(&obstacles_msg)) {
+		return false;
+	}
+
+	_latest_obstacles_msg = obstacles_msg;
+	_have_latest_obstacles_msg = true;
+
+	if (obstacles_msg.count == 0) {
+		_controller.clear_obstacles();
+		_obstacle_count = 0;
+		_time_obstacle_last_update = hrt_absolute_time();
+		return true;
+	}
+
+	if (obstacles_msg.frame != fw_mpc_obstacles_s::FRAME_LOCAL_ENU
+	    && obstacles_msg.frame != fw_mpc_obstacles_s::FRAME_LOCAL_NED) {
+		_controller.clear_obstacles();
+		_obstacle_count = 0;
+		return true;
+	}
+
+	const int count = math::min((int)obstacles_msg.count, (int)fw_mpc_obstacles_s::MAX_OBSTACLES);
+	std::vector<FwMpcController::Obstacle> obs;
+	obs.reserve(count);
+
+	for (int i = 0; i < count; i++) {
+		float n = 0.f;
+		float e = 0.f;
+		float u = 0.f;
+
+		if (obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU) {
+			n = obstacles_msg.y[i];
+			e = obstacles_msg.x[i];
+			u = obstacles_msg.z[i];
+
+		} else { // FRAME_LOCAL_NED
+			n = obstacles_msg.x[i];
+			e = obstacles_msg.y[i];
+			u = -obstacles_msg.z[i];
+		}
+
+		FwMpcController::Obstacle o{};
+		o.c = Vector3f{n, e, u};
+		o.R = obstacles_msg.radius[i];
+		o.height = obstacles_msg.height[i];
+		o.margin = obstacles_msg.margin[i];
+		o.planning_margin = math::max(_param_fw_mpc_obs_plan.get(), 0.f);
+		obs.push_back(o);
+		_obstacles[i] = o;
+	}
+
+	_controller.set_obstacles(obs);
+	_obstacle_count = count;
+	_time_obstacle_last_update = hrt_absolute_time();
+	return true;
+}
+
+void FwMpcAvoidance::refresh_auxiliary_publications()
+{
+	// Keep side topics used by debugging and visualization aligned with the latest mission and obstacle state.
+	const bool obstacle_publish_requested = poll_obstacle_updates();
+
+	mission_s mission_msg{};
+	home_position_s home_pos{};
+	vehicle_local_position_s lpos_for_debug{};
+
+	const bool mission_updated = _mission_sub.updated();
+	const bool have_mission = _mission_sub.copy(&mission_msg);
+	const bool have_lpos_for_debug = _lpos_sub.copy(&lpos_for_debug);
+	const bool have_home_pos = _home_pos_sub.copy(&home_pos);
+	const vehicle_local_position_s *lpos_for_publish = have_lpos_for_debug ? &lpos_for_debug : nullptr;
+	const mission_s *mission_for_publish = have_mission ? &mission_msg : nullptr;
+	const home_position_s *home_pos_for_publish = have_home_pos ? &home_pos : nullptr;
+	bool mission_publish_requested = mission_updated || !_have_last_mission_setpoint_position_publish;
+	mission_publish_requested |= should_publish_mission_setpoint_on_local_ref_change(lpos_for_publish);
+	mission_publish_requested |= should_publish_mission_setpoint_on_home_update(home_pos_for_publish);
+
+	publish_obstacle_position_if_requested(obstacle_publish_requested);
+	publish_mission_setpoint_position_if_requested(mission_publish_requested, lpos_for_publish,
+			mission_for_publish, home_pos_for_publish);
+}
+
+void FwMpcAvoidance::update_run_timing(hrt_abstime &now, float &dt)
+{
+	now = hrt_absolute_time();
+	dt = math::constrain((now - _last_run) * 1e-6f, 0.0005f, 0.2f);
+	_last_run = now;
 }
 
 float FwMpcAvoidance::thrust_to_direct_throttle(float thrust_cmd_N) const
@@ -409,6 +507,50 @@ void FwMpcAvoidance::publish_mission_setpoint_position(const vehicle_local_posit
 	_last_mission_setpoint_position_msg = msg;
 }
 
+bool FwMpcAvoidance::should_publish_mission_setpoint_on_local_ref_change(const vehicle_local_position_s *lpos) const
+{
+	if (lpos == nullptr) {
+		return false;
+	}
+
+	const bool mission_ref_valid = lpos->xy_global && lpos->z_global;
+	return !_have_last_mission_ref_state
+	       || mission_ref_valid != _last_mission_ref_valid
+	       || lpos->ref_timestamp != _last_mission_ref_timestamp;
+}
+
+bool FwMpcAvoidance::should_publish_mission_setpoint_on_home_update(const home_position_s *home_pos) const
+{
+	if (home_pos == nullptr) {
+		return false;
+	}
+
+	return !_have_last_mission_ref_state || home_pos->update_count != _last_home_update_count;
+}
+
+void FwMpcAvoidance::publish_obstacle_position_if_requested(bool publish_requested)
+{
+	if (!publish_requested) {
+		return;
+	}
+
+	publish_obstacle_position();
+}
+
+void FwMpcAvoidance::publish_mission_setpoint_position_if_requested(bool publish_requested,
+		const vehicle_local_position_s *lpos, const mission_s *mission, const home_position_s *home_pos)
+{
+	if (!publish_requested) {
+		return;
+	}
+
+	publish_mission_setpoint_position(lpos, mission, home_pos);
+	_have_last_mission_ref_state = true;
+	_last_mission_ref_valid = lpos != nullptr && lpos->xy_global && lpos->z_global;
+	_last_mission_ref_timestamp = lpos != nullptr ? lpos->ref_timestamp : 0;
+	_last_home_update_count = home_pos != nullptr ? home_pos->update_count : 0;
+}
+
 void FwMpcAvoidance::maybe_log_active_console_status(hrt_abstime now, bool mpc_active, int nearest_obstacle_index,
 		float nearest_distance, float trigger_distance, float vehicle_speed, bool solve_success, int qp_tier_used,
 		int qp_status, float qp_primal_residual, float qp_dual_residual, float qp_active_slack_max,
@@ -572,6 +714,340 @@ bool FwMpcAvoidance::should_allow_mpc(const vehicle_status_s &status, const vehi
 	return armed && fixed_wing && auto_position_control && auto_mission;
 }
 
+bool FwMpcAvoidance::compute_mpc_allowed(bool &obstacle_data_fresh)
+{
+	vehicle_status_s status{};
+	vehicle_control_mode_s control_mode{};
+	const bool have_status = _status_sub.copy(&status);
+	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
+	const hrt_abstime obstacle_timeout_us =
+		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
+	obstacle_data_fresh = (_obstacle_count > 0) && (hrt_elapsed_time(&_time_obstacle_last_update) <= obstacle_timeout_us);
+
+	return have_status && have_control_mode && should_allow_mpc(status, control_mode);
+}
+
+FwMpcAvoidance::MpcStateInputs FwMpcAvoidance::collect_mpc_state_inputs()
+{
+	MpcStateInputs inputs{};
+	inputs.have_state = _att_sub.copy(&inputs.att) && _rates_sub.copy(&inputs.rates) && _lpos_sub.copy(&inputs.lpos);
+
+	if (inputs.have_state) {
+		inputs.vel_ned = matrix::Vector3f{inputs.lpos.vx, inputs.lpos.vy, inputs.lpos.vz};
+		inputs.vehicle_speed = inputs.vel_ned.norm();
+
+	} else {
+		inputs.vehicle_speed = NAN;
+	}
+
+	fixed_wing_lateral_status_s fw_lat_status{};
+	const hrt_abstime lateral_status_timeout_us = 500000;
+	const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
+					 && PX4_ISFINITE(fw_lat_status.can_run_factor)
+					 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
+	inputs.can_run_factor = lateral_status_valid
+				? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
+				: 1.f;
+	return inputs;
+}
+
+void FwMpcAvoidance::update_mpc_activation_state(const MpcStateInputs &inputs, bool have_goal,
+		bool obstacle_data_fresh, hrt_abstime now, MpcRunTelemetry &telemetry)
+{
+	telemetry.vehicle_speed = inputs.vehicle_speed;
+	const bool trigger_now = inputs.have_state && have_goal
+				 && should_activate_mpc(inputs.lpos, inputs.vel_ned, telemetry.nearest_obstacle_distance,
+							telemetry.trigger_distance, telemetry.nearest_obstacle_index);
+	telemetry.obstacle_triggered = trigger_now;
+
+	if (trigger_now) {
+		telemetry.mpc_active_now = true;
+		_time_last_obstacle_trigger = now;
+
+	} else if (_mpc_active_last && obstacle_data_fresh && inputs.have_state && have_goal) {
+		const float exit_hysteresis = math::max(_param_fw_mpc_act_hys.get(), 0.f);
+		const hrt_abstime deact_hold_us = static_cast<hrt_abstime>(math::max(_param_fw_mpc_deact_t.get(), 0.f) * 1e6f);
+		const bool keep_by_distance = PX4_ISFINITE(telemetry.nearest_obstacle_distance) && PX4_ISFINITE(telemetry.trigger_distance)
+					      && (telemetry.nearest_obstacle_distance < (telemetry.trigger_distance + exit_hysteresis));
+		const bool keep_by_time = hrt_elapsed_time(&_time_last_obstacle_trigger) <= deact_hold_us;
+		telemetry.mpc_active_now = keep_by_distance || keep_by_time;
+	}
+
+	if (telemetry.mpc_active_now && !_mpc_active_last) {
+		_mpc_ready = false;
+		_have_last_valid_mpc_setpoint = false;
+		_have_last_model_prediction = false;
+		_last_model_prediction_horizon_steps = 0;
+	}
+}
+
+void FwMpcAvoidance::update_prediction_error_metrics(const FwMpcController::StateVec &x_now, hrt_abstime now,
+		MpcRunTelemetry &telemetry) const
+{
+	if (!_have_last_model_prediction) {
+		return;
+	}
+
+	const float pred_age_s = (now - _time_last_model_prediction) * 1e-6f;
+	const float model_dt_s = math::max(_param_fw_mpc_avoid_dt.get(), 1e-3f);
+	FwMpcController::StateVec x_pred_ref{};
+
+	if (!sample_model_prediction(pred_age_s, model_dt_s, x_pred_ref)) {
+		return;
+	}
+
+	telemetry.model_pred_age_s = pred_age_s;
+
+	const Vector3f pos_now{x_now(9), x_now(10), x_now(11)};
+	const Vector3f pos_pred{x_pred_ref(9), x_pred_ref(10), x_pred_ref(11)};
+	telemetry.model_pred_pos_error = (pos_now - pos_pred).norm();
+
+	const Vector3f vel_now{x_now(0), x_now(1), x_now(2)};
+	const Vector3f vel_pred{x_pred_ref(0), x_pred_ref(1), x_pred_ref(2)};
+	telemetry.model_pred_vel_error = (vel_now - vel_pred).norm();
+
+	const float dphi = matrix::wrap_pi(x_now(6) - x_pred_ref(6));
+	const float dtheta = matrix::wrap_pi(x_now(7) - x_pred_ref(7));
+	const float dpsi = matrix::wrap_pi(x_now(8) - x_pred_ref(8));
+	telemetry.model_pred_att_error = sqrtf(dphi * dphi + dtheta * dtheta + dpsi * dpsi);
+}
+
+void FwMpcAvoidance::build_mpc_step_context(const MpcStateInputs &inputs,
+		const vehicle_local_position_setpoint_s &lpos_sp, const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp,
+		bool have_nominal_lon, hrt_abstime now, MpcRunTelemetry &telemetry, MpcStepContext &context)
+{
+	// Translate estimator and guidance outputs into the state/reference quantities used by the MPC model.
+	const matrix::Quatf q(inputs.att.q);
+	const matrix::Dcmf R_nb{q};
+	const matrix::Eulerf euler(q);
+	airspeed_validated_s airspeed_validated{};
+	const bool airspeed_valid = _airspeed_validated_sub.copy(&airspeed_validated)
+				   && PX4_ISFINITE(airspeed_validated.calibrated_airspeed_m_s)
+				   && PX4_ISFINITE(airspeed_validated.true_airspeed_m_s)
+				   && airspeed_validated.airspeed_source != airspeed_validated_s::SOURCE_SYNTHETIC
+				   && hrt_elapsed_time(&airspeed_validated.timestamp) <= 1_s;
+	wind_s wind{};
+	const bool wind_valid = _wind_sub.copy(&wind)
+				&& PX4_ISFINITE(wind.windspeed_north)
+				&& PX4_ISFINITE(wind.windspeed_east)
+				&& hrt_elapsed_time(&wind.timestamp) <= 1_s;
+	const matrix::Vector3f wind_N = wind_valid ? matrix::Vector3f{wind.windspeed_north, wind.windspeed_east, 0.f}
+				 : matrix::Vector3f{};
+	const matrix::Vector3f vel_air_N = inputs.vel_ned - wind_N;
+	const matrix::Vector3f vel_B = R_nb.transpose() * vel_air_N;
+	const float vehicle_airspeed_tas = vel_air_N.norm();
+	context.vehicle_airspeed_cas = airspeed_valid ? math::max(0.5f, airspeed_validated.calibrated_airspeed_m_s)
+				      : vehicle_airspeed_tas;
+	context.vehicle_airspeed_ref = airspeed_valid ? math::max(0.5f, airspeed_validated.true_airspeed_m_s)
+				      : vehicle_airspeed_tas;
+	const float eas2tas = (airspeed_valid && context.vehicle_airspeed_cas > 0.5f)
+			      ? math::constrain(airspeed_validated.true_airspeed_m_s / context.vehicle_airspeed_cas, 0.9f, 2.0f)
+			      : 1.f;
+
+	if (inputs.lpos.z_global && PX4_ISFINITE(inputs.lpos.ref_alt)) {
+		_controller.set_altitude_origin_amsl(inputs.lpos.ref_alt);
+	}
+
+	_controller.set_wind_ned(wind_N);
+
+	context.x_now(0) = vel_B(0);
+	context.x_now(1) = vel_B(1);
+	context.x_now(2) = vel_B(2);
+	context.x_now(3) = inputs.rates.xyz[0];
+	context.x_now(4) = inputs.rates.xyz[1];
+	context.x_now(5) = inputs.rates.xyz[2];
+	context.x_now(6) = euler.phi();
+	context.x_now(7) = euler.theta();
+	context.x_now(8) = euler.psi();
+	context.x_now(9) = inputs.lpos.x;
+	context.x_now(10) = inputs.lpos.y;
+	context.x_now(11) = -inputs.lpos.z;
+
+	update_prediction_error_metrics(context.x_now, now, telemetry);
+
+	context.goal_up = matrix::Vector3f{lpos_sp.x, lpos_sp.y, -lpos_sp.z};
+	const bool have_nominal_airspeed = have_nominal_lon
+					 && PX4_ISFINITE(nominal_lon_sp.equivalent_airspeed)
+					 && nominal_lon_sp.equivalent_airspeed > 1.f;
+	context.cruise_airspeed = have_nominal_airspeed
+				 ? math::max(nominal_lon_sp.equivalent_airspeed * eas2tas, 8.f)
+				 : math::max(context.vehicle_airspeed_ref, 8.f);
+}
+
+void FwMpcAvoidance::fill_setpoints_from_mpc_command(const MpcStateInputs &inputs, const MpcStepContext &context,
+		const FwMpcController::ControlVec &u_cmd, const FwMpcController::StateVec &x_pred, hrt_abstime now, float dt,
+		const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp, bool have_nominal_lon,
+		PublishedSetpoints &setpoints) const
+{
+	const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+	const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
+	const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
+	const float roll_rate_rad_s = math::radians(math::max(_param_fw_r_rmax.get(), 0.f));
+	const float pitch_rate_neg_rad_s = math::radians(math::max(_param_fw_p_rmax_neg.get(), 0.f));
+	const float pitch_rate_pos_rad_s = math::radians(math::max(_param_fw_p_rmax_pos.get(), 0.f));
+	const float phi_cmd_slewed = limit_roll_setpoint_for_downstream(x_pred(6), dt);
+	const float phi_cmd = limit_attitude_error_for_downstream(phi_cmd_slewed, context.x_now(6),
+				     _param_fw_r_tc.get(), roll_rate_rad_s, roll_rate_rad_s);
+	const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
+	const float theta_cmd_dyn = limit_attitude_error_for_downstream(theta_cmd_raw, context.x_now(7),
+				      _param_fw_p_tc.get(), pitch_rate_neg_rad_s, pitch_rate_pos_rad_s);
+	const float theta_cmd = constrain_pitch_safety(theta_cmd_dyn, context.vehicle_airspeed_cas, context.x_now(11),
+				      pitch_min_rad, pitch_max_rad);
+	float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd) / inputs.can_run_factor;
+	lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
+	const float lateral_accel_pub_lim = CONSTANTS_ONE_G * tanf(roll_lim_rad) / inputs.can_run_factor;
+	lateral_accel_cmd = math::constrain(lateral_accel_cmd, -lateral_accel_pub_lim, lateral_accel_pub_lim);
+	const matrix::Quatf q_pred(matrix::Eulerf(x_pred(6), x_pred(7), x_pred(8)));
+	const matrix::Dcmf R_nb_pred{q_pred};
+	const Vector3f v_air_pred_B{x_pred(0), x_pred(1), x_pred(2)};
+	const Vector3f v_air_pred_N = R_nb_pred * v_air_pred_B;
+	const Vector2f v_air_pred_xy{v_air_pred_N(0), v_air_pred_N(1)};
+	const float airspeed_direction_cmd = (v_air_pred_xy.norm() > 2.f)
+					     ? atan2f(v_air_pred_xy(1), v_air_pred_xy(0))
+					     : NAN;
+
+	setpoints.lat.timestamp = now;
+	setpoints.lat.course = NAN;
+	setpoints.lat.airspeed_direction = airspeed_direction_cmd;
+	setpoints.lat.lateral_acceleration = lateral_accel_cmd;
+
+	if (have_nominal_lon) {
+		setpoints.lon.altitude = nominal_lon_sp.altitude;
+		setpoints.lon.height_rate = nominal_lon_sp.height_rate;
+		setpoints.lon.equivalent_airspeed = nominal_lon_sp.equivalent_airspeed;
+
+	} else {
+		setpoints.lon.altitude = NAN;
+		setpoints.lon.height_rate = NAN;
+		setpoints.lon.equivalent_airspeed = NAN;
+	}
+
+	setpoints.lon.timestamp = now;
+	setpoints.lon.pitch_direct = theta_cmd;
+	setpoints.lon.throttle_direct = _param_fw_mpc_thr_en.get() ? thrust_to_direct_throttle(u_cmd(3)) : NAN;
+	setpoints.have_lat = true;
+	setpoints.have_lon = true;
+}
+
+void FwMpcAvoidance::update_cached_mpc_solution(const FwMpcController::QpDebug &qp_debug,
+		const PublishedSetpoints &setpoints, hrt_abstime now)
+{
+	if (!qp_debug.solve_success || !setpoints.have_lat || !setpoints.have_lon) {
+		return;
+	}
+
+	_last_valid_lat_sp = setpoints.lat;
+	_last_valid_lon_sp = setpoints.lon;
+	_time_last_valid_mpc_setpoint = now;
+	_have_last_valid_mpc_setpoint = true;
+	_last_model_prediction_horizon = _controller.last_solved_state_horizon();
+	_last_model_prediction_horizon_steps = _controller.horizon();
+	_time_last_model_prediction = now;
+	_have_last_model_prediction = true;
+}
+
+void FwMpcAvoidance::maybe_use_last_valid_mpc_setpoints(hrt_abstime now, PublishedSetpoints &setpoints) const
+{
+	const hrt_abstime hold_timeout_us =
+		static_cast<hrt_abstime>(math::max(_param_fw_mpc_fail_hold.get(), 0.f) * 1e6f);
+
+	if (!_have_last_valid_mpc_setpoint || hrt_elapsed_time(&_time_last_valid_mpc_setpoint) > hold_timeout_us) {
+		return;
+	}
+
+	setpoints.lat = _last_valid_lat_sp;
+	setpoints.lon = _last_valid_lon_sp;
+	setpoints.lat.timestamp = now;
+	setpoints.lon.timestamp = now;
+	setpoints.have_lat = true;
+	setpoints.have_lon = true;
+}
+
+void FwMpcAvoidance::run_active_mpc(const MpcStateInputs &inputs, const MpcStepContext &context, hrt_abstime now, float dt,
+		const fixed_wing_longitudinal_setpoint_s &nominal_lon_sp, bool have_nominal_lon,
+		const MpcRunTelemetry &telemetry, PublishedSetpoints &setpoints)
+{
+	if (!_mpc_ready) {
+		_controller.initTrim(context.cruise_airspeed, context.x_now(11), context.goal_up);
+		_mpc_ready = true;
+	}
+
+	_controller.set_guidance_quality_factor(inputs.can_run_factor);
+	const float model_pos_error_term = PX4_ISFINITE(telemetry.model_pred_pos_error) ? math::max(telemetry.model_pred_pos_error, 0.f) : 0.f;
+	const float prediction_age_term = PX4_ISFINITE(telemetry.model_pred_age_s) ? math::max(telemetry.model_pred_age_s, 0.f) : 0.f;
+	const float robust_margin = math::constrain(
+					 math::max(_param_fw_mpc_rb_base.get(), 0.f)
+					 + math::max(_param_fw_mpc_rb_vscl.get(), 0.f) * math::max(context.vehicle_airspeed_ref, 0.f)
+					 + math::max(_param_fw_mpc_rb_perr.get(), 0.f) * model_pos_error_term
+					 + math::max(_param_fw_mpc_rb_fage.get(), 0.f) * prediction_age_term
+					 + math::max(_param_fw_mpc_rb_qfac.get(), 0.f) * math::max(1.f - inputs.can_run_factor, 0.f),
+					 0.f, 20.f);
+	_controller.set_robustness_margin(robust_margin);
+
+	FwMpcController::ControlVec u_cmd{};
+	FwMpcController::StateVec x_pred{};
+	const float obstacle_attention_distance = PX4_ISFINITE(telemetry.trigger_distance) ? telemetry.trigger_distance : 0.f;
+	const bool have_mpc_command = _controller.step(context.x_now, context.goal_up, context.cruise_airspeed, false,
+					      obstacle_attention_distance, dt, u_cmd, x_pred);
+	const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
+
+	if (have_mpc_command) {
+		fill_setpoints_from_mpc_command(inputs, context, u_cmd, x_pred, now, dt, nominal_lon_sp, have_nominal_lon, setpoints);
+		update_cached_mpc_solution(step_qp_debug, setpoints, now);
+		return;
+	}
+
+	maybe_use_last_valid_mpc_setpoints(now, setpoints);
+}
+
+void FwMpcAvoidance::reset_inactive_mpc_state()
+{
+	_have_last_model_prediction = false;
+	_last_model_prediction_horizon_steps = 0;
+	_have_last_published_roll_sp = false;
+}
+
+void FwMpcAvoidance::finalize_run_cycle(hrt_abstime now, bool mpc_allowed, bool obstacle_data_fresh,
+		const MpcRunTelemetry &telemetry, const PublishedSetpoints &setpoints)
+{
+	if (!telemetry.mpc_active_now) {
+		reset_inactive_mpc_state();
+	}
+
+	_mpc_active_last = telemetry.mpc_active_now;
+	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
+	maybe_log_active_console_status(now, telemetry.mpc_active_now, telemetry.nearest_obstacle_index,
+				       telemetry.nearest_obstacle_distance, telemetry.trigger_distance,
+				       telemetry.vehicle_speed, qp_debug.solve_success, qp_debug.solve_tier_used,
+				       _controller.last_qp_status(), qp_debug.primal_residual, qp_debug.dual_residual,
+				       qp_debug.active_slack_max, telemetry.model_pred_pos_error, telemetry.model_pred_vel_error,
+				       telemetry.model_pred_att_error, telemetry.model_pred_age_s);
+	publish_mpc_status(mpc_allowed, telemetry.mpc_active_now, obstacle_data_fresh, telemetry.obstacle_triggered,
+			   telemetry.emergency_turn_active, telemetry.nearest_obstacle_index, telemetry.nearest_obstacle_distance,
+			   telemetry.trigger_distance, telemetry.vehicle_speed, _controller.last_qp_status(),
+			   telemetry.model_pred_pos_error, telemetry.model_pred_vel_error, telemetry.model_pred_att_error,
+			   telemetry.model_pred_age_s, qp_debug.solve_success, qp_debug.solve_tier_used,
+			   qp_debug.status_polish, qp_debug.objective_value, qp_debug.primal_residual,
+			   qp_debug.dual_residual, qp_debug.active_slack_max, qp_debug.active_slack_sum,
+			   qp_debug.iterations, qp_debug.solve_time_us, qp_debug.nonlinear_min_clearance,
+			   qp_debug.accepted_step_scale, qp_debug.full_step_rejected);
+
+	if (setpoints.have_lat) {
+		if (telemetry.mpc_active_now && PX4_ISFINITE(setpoints.lat.lateral_acceleration)) {
+			const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
+			_last_published_roll_sp_rad = math::constrain(atanf(setpoints.lat.lateral_acceleration / CONSTANTS_ONE_G),
+						      -roll_lim_rad, roll_lim_rad);
+			_have_last_published_roll_sp = true;
+		}
+
+		_lat_sp_pub.publish(setpoints.lat);
+	}
+
+	if (setpoints.have_lon) {
+		_lon_sp_pub.publish(setpoints.lon);
+	}
+}
+
 void FwMpcAvoidance::Run()
 {
 	if (should_exit()) {
@@ -581,395 +1057,40 @@ void FwMpcAvoidance::Run()
 	}
 
 	parameters_update();
+	refresh_auxiliary_publications();
 
-	fw_mpc_obstacles_s obstacles_msg{};
-	bool obstacle_publish_requested = false;
+	hrt_abstime now{};
+	float dt{0.f};
+	update_run_timing(now, dt);
 
-	if (_fw_mpc_obstacles_sub.update(&obstacles_msg)) {
-		_latest_obstacles_msg = obstacles_msg;
-		_have_latest_obstacles_msg = true;
-		obstacle_publish_requested = true;
-
-		if (obstacles_msg.count == 0) {
-			_controller.clear_obstacles();
-			_obstacle_count = 0;
-			_time_obstacle_last_update = hrt_absolute_time();
-
-		} else if (obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU
-			   || obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_NED) {
-			const int count = math::min((int)obstacles_msg.count, (int)fw_mpc_obstacles_s::MAX_OBSTACLES);
-			std::vector<FwMpcController::Obstacle> obs;
-			obs.reserve(count);
-
-			for (int i = 0; i < count; i++) {
-				float n = 0.f;
-				float e = 0.f;
-				float u = 0.f;
-
-				if (obstacles_msg.frame == fw_mpc_obstacles_s::FRAME_LOCAL_ENU) {
-					n = obstacles_msg.y[i];
-					e = obstacles_msg.x[i];
-					u = obstacles_msg.z[i];
-
-				} else { // FRAME_LOCAL_NED
-					n = obstacles_msg.x[i];
-					e = obstacles_msg.y[i];
-					u = -obstacles_msg.z[i];
-				}
-
-				FwMpcController::Obstacle o{};
-				o.c = Vector3f{n, e, u};
-				o.R = obstacles_msg.radius[i];
-				o.height = obstacles_msg.height[i];
-				o.margin = obstacles_msg.margin[i];
-				o.planning_margin = math::max(_param_fw_mpc_obs_plan.get(), 0.f);
-				obs.push_back(o);
-				_obstacles[i] = o;
-			}
-
-			_controller.set_obstacles(obs);
-			_obstacle_count = count;
-			_time_obstacle_last_update = hrt_absolute_time();
-
-		} else {
-			_controller.clear_obstacles();
-			_obstacle_count = 0;
-		}
-	}
-
-	const hrt_abstime now = hrt_absolute_time();
-	const float dt = math::constrain((now - _last_run) * 1e-6f, 0.001f, 0.1f);
-	_last_run = now;
-
-	fixed_wing_lateral_setpoint_s lat_sp{};
-	fixed_wing_longitudinal_setpoint_s lon_sp{};
 	fixed_wing_longitudinal_setpoint_s nominal_lon_sp{};
 	vehicle_local_position_setpoint_s lpos_sp{};
-	vehicle_local_position_s lpos_for_debug{};
-	mission_s mission_msg{};
-	home_position_s home_pos{};
-
-	bool have_lat = false;
-	bool have_lon = false;
 	const bool have_goal = _lpos_sp_sub.copy(&lpos_sp);
-	const bool mission_updated = _mission_sub.updated();
-	const bool have_mission = _mission_sub.copy(&mission_msg);
-	const bool have_lpos_for_debug = _lpos_sub.copy(&lpos_for_debug);
-	const bool have_home_pos = _home_pos_sub.copy(&home_pos);
-	bool mission_publish_requested = mission_updated || !_have_last_mission_setpoint_position_publish;
-
-	if (have_lpos_for_debug) {
-		const bool mission_ref_valid = lpos_for_debug.xy_global && lpos_for_debug.z_global;
-
-		if (!_have_last_mission_ref_state
-		    || mission_ref_valid != _last_mission_ref_valid
-		    || lpos_for_debug.ref_timestamp != _last_mission_ref_timestamp) {
-			mission_publish_requested = true;
-		}
-	}
-
-	if (have_home_pos
-	    && (!_have_last_mission_ref_state || home_pos.update_count != _last_home_update_count)) {
-		mission_publish_requested = true;
-	}
-
-	if (obstacle_publish_requested) {
-		publish_obstacle_position();
-	}
-
-	if (mission_publish_requested) {
-		publish_mission_setpoint_position(have_lpos_for_debug ? &lpos_for_debug : nullptr,
-						 have_mission ? &mission_msg : nullptr,
-						 have_home_pos ? &home_pos : nullptr);
-		_have_last_mission_ref_state = true;
-		_last_mission_ref_valid = have_lpos_for_debug && lpos_for_debug.xy_global && lpos_for_debug.z_global;
-		_last_mission_ref_timestamp = have_lpos_for_debug ? lpos_for_debug.ref_timestamp : 0;
-		_last_home_update_count = have_home_pos ? home_pos.update_count : 0;
-	}
-
 	const bool have_nominal_lon = _fw_nominal_lon_sp_sub.copy(&nominal_lon_sp);
-	float nearest_obstacle_distance = NAN;
-	float trigger_distance = NAN;
-	int nearest_obstacle_index = -1;
-	float vehicle_speed = NAN;
-	float model_pred_pos_error = NAN;
-	float model_pred_vel_error = NAN;
-	float model_pred_att_error = NAN;
-	float model_pred_age_s = NAN;
-	bool obstacle_triggered = false;
-	bool emergency_turn_active = false;
-	vehicle_status_s status{};
-	vehicle_control_mode_s control_mode{};
-	const bool have_status = _status_sub.copy(&status);
-	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
-	const bool mpc_allowed = have_status && have_control_mode && should_allow_mpc(status, control_mode);
-	const hrt_abstime obstacle_timeout_us =
-		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
-	const bool obstacle_data_fresh = (_obstacle_count > 0) && (hrt_elapsed_time(&_time_obstacle_last_update) <= obstacle_timeout_us);
-
-	bool mpc_active_now = false;
+	bool obstacle_data_fresh = false;
+	const bool mpc_allowed = compute_mpc_allowed(obstacle_data_fresh);
+	MpcRunTelemetry telemetry{};
+	telemetry.nearest_obstacle_distance = NAN;
+	telemetry.trigger_distance = NAN;
+	telemetry.vehicle_speed = NAN;
+	telemetry.model_pred_pos_error = NAN;
+	telemetry.model_pred_vel_error = NAN;
+	telemetry.model_pred_att_error = NAN;
+	telemetry.model_pred_age_s = NAN;
+	PublishedSetpoints setpoints{};
 
 	if (_param_fw_mpc_avoid_en.get() && mpc_allowed) {
-		vehicle_attitude_s att{};
-		vehicle_angular_velocity_s rates{};
-		vehicle_local_position_s lpos{};
+		const MpcStateInputs inputs = collect_mpc_state_inputs();
+		update_mpc_activation_state(inputs, have_goal, obstacle_data_fresh, now, telemetry);
 
-		const bool have_state = _att_sub.copy(&att) && _rates_sub.copy(&rates) && _lpos_sub.copy(&lpos);
-		const matrix::Vector3f vel_N{lpos.vx, lpos.vy, lpos.vz};
-		vehicle_speed = vel_N.norm();
-		fixed_wing_lateral_status_s fw_lat_status{};
-		const hrt_abstime lateral_status_timeout_us = 500000;
-		const bool lateral_status_valid = _fw_lat_status_sub.copy(&fw_lat_status)
-					 && PX4_ISFINITE(fw_lat_status.can_run_factor)
-					 && hrt_elapsed_time(&fw_lat_status.timestamp) <= lateral_status_timeout_us;
-		const float can_run_factor = lateral_status_valid
-					    ? math::constrain(fw_lat_status.can_run_factor, 0.05f, 1.f)
-					    : 1.f;
-		const bool trigger_now = have_state && have_goal
-				 && should_activate_mpc(lpos, vel_N, nearest_obstacle_distance, trigger_distance, nearest_obstacle_index);
-		obstacle_triggered = trigger_now;
-
-		if (trigger_now) {
-			mpc_active_now = true;
-			_time_last_obstacle_trigger = now;
-
-		} else if (_mpc_active_last && obstacle_data_fresh && have_state && have_goal) {
-			const float exit_hysteresis = math::max(_param_fw_mpc_act_hys.get(), 0.f);
-			const hrt_abstime deact_hold_us = static_cast<hrt_abstime>(math::max(_param_fw_mpc_deact_t.get(), 0.f) * 1e6f);
-			const bool keep_by_distance = PX4_ISFINITE(nearest_obstacle_distance) && PX4_ISFINITE(trigger_distance)
-						      && (nearest_obstacle_distance < (trigger_distance + exit_hysteresis));
-			const bool keep_by_time = hrt_elapsed_time(&_time_last_obstacle_trigger) <= deact_hold_us;
-			mpc_active_now = keep_by_distance || keep_by_time;
+		if (telemetry.mpc_active_now && inputs.have_state && have_goal) {
+			MpcStepContext context{};
+			build_mpc_step_context(inputs, lpos_sp, nominal_lon_sp, have_nominal_lon, now, telemetry, context);
+			run_active_mpc(inputs, context, now, dt, nominal_lon_sp, have_nominal_lon, telemetry, setpoints);
 		}
-
-		if (mpc_active_now && !_mpc_active_last) {
-			// Reinitialize trim whenever MPC takes over again.
-			_mpc_ready = false;
-			_have_last_valid_mpc_setpoint = false;
-			_have_last_model_prediction = false;
-			_last_model_prediction_horizon_steps = 0;
-		}
-
-		if (mpc_active_now && have_state && have_goal) {
-			const matrix::Quatf q(att.q);
-			const matrix::Dcmf R_nb{q};
-			const matrix::Eulerf euler(q);
-			airspeed_validated_s airspeed_validated{};
-			const bool airspeed_valid = _airspeed_validated_sub.copy(&airspeed_validated)
-						   && PX4_ISFINITE(airspeed_validated.calibrated_airspeed_m_s)
-						   && PX4_ISFINITE(airspeed_validated.true_airspeed_m_s)
-						   && airspeed_validated.airspeed_source != airspeed_validated_s::SOURCE_SYNTHETIC
-						   && hrt_elapsed_time(&airspeed_validated.timestamp) <= 1_s;
-			wind_s wind{};
-			const bool wind_valid = _wind_sub.copy(&wind)
-						&& PX4_ISFINITE(wind.windspeed_north)
-						&& PX4_ISFINITE(wind.windspeed_east)
-						&& hrt_elapsed_time(&wind.timestamp) <= 1_s;
-			const matrix::Vector3f wind_N = wind_valid ? matrix::Vector3f{wind.windspeed_north, wind.windspeed_east, 0.f}
-						 : matrix::Vector3f{};
-			const matrix::Vector3f vel_air_N = vel_N - wind_N;
-			const matrix::Vector3f vel_B = R_nb.transpose() * vel_air_N;
-			const float vehicle_airspeed_tas = vel_air_N.norm();
-			const float vehicle_airspeed_cas = airspeed_valid ? math::max(0.5f, airspeed_validated.calibrated_airspeed_m_s)
-							 : vehicle_airspeed_tas;
-			const float vehicle_airspeed_ref = airspeed_valid ? math::max(0.5f, airspeed_validated.true_airspeed_m_s)
-							 : vehicle_airspeed_tas;
-			const float eas2tas = (airspeed_valid && vehicle_airspeed_cas > 0.5f)
-					      ? math::constrain(airspeed_validated.true_airspeed_m_s / vehicle_airspeed_cas, 0.9f, 2.0f)
-					      : 1.f;
-
-			if (lpos.z_global && PX4_ISFINITE(lpos.ref_alt)) {
-				_controller.set_altitude_origin_amsl(lpos.ref_alt);
-			}
-
-			_controller.set_wind_ned(wind_N);
-
-			FwMpcController::StateVec x_now{};
-			x_now(0) = vel_B(0);
-			x_now(1) = vel_B(1);
-			x_now(2) = vel_B(2);
-			x_now(3) = rates.xyz[0];
-			x_now(4) = rates.xyz[1];
-			x_now(5) = rates.xyz[2];
-			x_now(6) = euler.phi();
-			x_now(7) = euler.theta();
-			x_now(8) = euler.psi();
-			x_now(9) = lpos.x;
-			x_now(10) = lpos.y;
-			x_now(11) = -lpos.z; // up
-
-			if (_have_last_model_prediction) {
-				const float pred_age_s = (now - _time_last_model_prediction) * 1e-6f;
-				const float model_dt_s = math::max(_param_fw_mpc_avoid_dt.get(), 1e-3f);
-				FwMpcController::StateVec x_pred_ref{};
-
-				if (sample_model_prediction(pred_age_s, model_dt_s, x_pred_ref)) {
-					model_pred_age_s = pred_age_s;
-
-					const Vector3f pos_now{x_now(9), x_now(10), x_now(11)};
-					const Vector3f pos_pred{x_pred_ref(9), x_pred_ref(10), x_pred_ref(11)};
-					model_pred_pos_error = (pos_now - pos_pred).norm();
-
-					const Vector3f vel_now{x_now(0), x_now(1), x_now(2)};
-					const Vector3f vel_pred{x_pred_ref(0), x_pred_ref(1), x_pred_ref(2)};
-					model_pred_vel_error = (vel_now - vel_pred).norm();
-
-					const float dphi = matrix::wrap_pi(x_now(6) - x_pred_ref(6));
-					const float dtheta = matrix::wrap_pi(x_now(7) - x_pred_ref(7));
-					const float dpsi = matrix::wrap_pi(x_now(8) - x_pred_ref(8));
-					model_pred_att_error = sqrtf(dphi * dphi + dtheta * dtheta + dpsi * dpsi);
-				}
-			}
-
-			const matrix::Vector3f goal_up{lpos_sp.x, lpos_sp.y, -lpos_sp.z};
-			const bool have_nominal_airspeed = have_nominal_lon
-						 && PX4_ISFINITE(nominal_lon_sp.equivalent_airspeed)
-						 && nominal_lon_sp.equivalent_airspeed > 1.f;
-			const float V_cruise = have_nominal_airspeed
-					       ? math::max(nominal_lon_sp.equivalent_airspeed * eas2tas, 8.f)
-					       : math::max(vehicle_airspeed_ref, 8.f);
-
-			if (!_mpc_ready) {
-				_controller.initTrim(V_cruise, x_now(11), goal_up);
-				_mpc_ready = true;
-			}
-
-			_controller.set_guidance_quality_factor(can_run_factor);
-			const float model_pos_error_term = PX4_ISFINITE(model_pred_pos_error) ? math::max(model_pred_pos_error, 0.f) : 0.f;
-			const float prediction_age_term = PX4_ISFINITE(model_pred_age_s) ? math::max(model_pred_age_s, 0.f) : 0.f;
-			const float robust_margin = math::constrain(
-							 math::max(_param_fw_mpc_rb_base.get(), 0.f)
-							 + math::max(_param_fw_mpc_rb_vscl.get(), 0.f) * math::max(vehicle_airspeed_ref, 0.f)
-							 + math::max(_param_fw_mpc_rb_perr.get(), 0.f) * model_pos_error_term
-							 + math::max(_param_fw_mpc_rb_fage.get(), 0.f) * prediction_age_term
-							 + math::max(_param_fw_mpc_rb_qfac.get(), 0.f) * math::max(1.f - can_run_factor, 0.f),
-							 0.f, 20.f);
-			_controller.set_robustness_margin(robust_margin);
-			FwMpcController::ControlVec u_cmd{};
-			FwMpcController::StateVec x_pred{};
-			const float obstacle_attention_distance = PX4_ISFINITE(trigger_distance) ? trigger_distance : 0.f;
-			const bool have_mpc_command = _controller.step(x_now, goal_up, V_cruise, false, obstacle_attention_distance, dt, u_cmd, x_pred);
-			const FwMpcController::QpDebug &step_qp_debug = _controller.last_qp_debug();
-
-			if (have_mpc_command) {
-					const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
-					const float pitch_min_rad = math::radians(_param_fw_p_lim_min.get());
-					const float pitch_max_rad = math::radians(_param_fw_p_lim_max.get());
-					const float roll_rate_rad_s = math::radians(math::max(_param_fw_r_rmax.get(), 0.f));
-					const float pitch_rate_neg_rad_s = math::radians(math::max(_param_fw_p_rmax_neg.get(), 0.f));
-					const float pitch_rate_pos_rad_s = math::radians(math::max(_param_fw_p_rmax_pos.get(), 0.f));
-					const float phi_cmd_slewed = limit_roll_setpoint_for_downstream(x_pred(6), dt);
-					const float phi_cmd = limit_attitude_error_for_downstream(phi_cmd_slewed, x_now(6),
-							     _param_fw_r_tc.get(), roll_rate_rad_s, roll_rate_rad_s);
-					const float theta_cmd_raw = math::constrain(x_pred(7), pitch_min_rad, pitch_max_rad);
-					const float theta_cmd_dyn = limit_attitude_error_for_downstream(theta_cmd_raw, x_now(7),
-							      _param_fw_p_tc.get(), pitch_rate_neg_rad_s, pitch_rate_pos_rad_s);
-					const float theta_cmd = constrain_pitch_safety(theta_cmd_dyn, vehicle_airspeed_cas, x_now(11),
-							      pitch_min_rad, pitch_max_rad);
-					float lateral_accel_cmd = CONSTANTS_ONE_G * tanf(phi_cmd) / can_run_factor;
-					lateral_accel_cmd = PX4_ISFINITE(lateral_accel_cmd) ? lateral_accel_cmd : 0.f;
-					const float lateral_accel_pub_lim = CONSTANTS_ONE_G * tanf(roll_lim_rad) / can_run_factor;
-					lateral_accel_cmd = math::constrain(lateral_accel_cmd,
-									  -lateral_accel_pub_lim,
-									  lateral_accel_pub_lim);
-					const matrix::Quatf q_pred(matrix::Eulerf(x_pred(6), x_pred(7), x_pred(8)));
-					const matrix::Dcmf R_nb_pred{q_pred};
-					const Vector3f v_air_pred_B{x_pred(0), x_pred(1), x_pred(2)};
-				const Vector3f v_air_pred_N = R_nb_pred * v_air_pred_B;
-				const Vector2f v_air_pred_xy{v_air_pred_N(0), v_air_pred_N(1)};
-				const float airspeed_direction_cmd = (v_air_pred_xy.norm() > 2.f)
-								     ? atan2f(v_air_pred_xy(1), v_air_pred_xy(0))
-								     : NAN;
-
-				lat_sp.timestamp = now;
-				lat_sp.course = NAN;
-				lat_sp.airspeed_direction = airspeed_direction_cmd;
-				lat_sp.lateral_acceleration = lateral_accel_cmd;
-
-				if (have_nominal_lon) {
-					lon_sp.altitude = nominal_lon_sp.altitude;
-					lon_sp.height_rate = nominal_lon_sp.height_rate;
-					lon_sp.equivalent_airspeed = nominal_lon_sp.equivalent_airspeed;
-
-				} else {
-					lon_sp.altitude = NAN;
-					lon_sp.height_rate = NAN;
-					lon_sp.equivalent_airspeed = NAN;
-				}
-
-				lon_sp.timestamp = now;
-				lon_sp.pitch_direct = theta_cmd;
-				lon_sp.throttle_direct = _param_fw_mpc_thr_en.get() ? thrust_to_direct_throttle(u_cmd(3)) : NAN;
-				have_lat = true;
-				have_lon = true;
-
-				if (step_qp_debug.solve_success) {
-					_last_valid_lat_sp = lat_sp;
-					_last_valid_lon_sp = lon_sp;
-					_time_last_valid_mpc_setpoint = now;
-					_have_last_valid_mpc_setpoint = true;
-					_last_model_prediction_horizon = _controller.last_solved_state_horizon();
-					_last_model_prediction_horizon_steps = _controller.horizon();
-					_time_last_model_prediction = now;
-					_have_last_model_prediction = true;
-				}
-
-			} else {
-				const hrt_abstime hold_timeout_us =
-					static_cast<hrt_abstime>(math::max(_param_fw_mpc_fail_hold.get(), 0.f) * 1e6f);
-
-				if (_have_last_valid_mpc_setpoint
-				    && hrt_elapsed_time(&_time_last_valid_mpc_setpoint) <= hold_timeout_us) {
-					lat_sp = _last_valid_lat_sp;
-					lon_sp = _last_valid_lon_sp;
-					lat_sp.timestamp = now;
-					lon_sp.timestamp = now;
-					have_lat = true;
-					have_lon = true;
-				}
-			}
-
-			}
-		}
-
-	if (!mpc_active_now) {
-		_have_last_model_prediction = false;
-		_last_model_prediction_horizon_steps = 0;
-		_have_last_published_roll_sp = false;
 	}
 
-	_mpc_active_last = mpc_active_now;
-	const FwMpcController::QpDebug &qp_debug = _controller.last_qp_debug();
-	maybe_log_active_console_status(now, mpc_active_now, nearest_obstacle_index, nearest_obstacle_distance,
-				       trigger_distance, vehicle_speed, qp_debug.solve_success, qp_debug.solve_tier_used,
-				       _controller.last_qp_status(), qp_debug.primal_residual, qp_debug.dual_residual,
-				       qp_debug.active_slack_max, model_pred_pos_error, model_pred_vel_error,
-				       model_pred_att_error, model_pred_age_s);
-	publish_mpc_status(mpc_allowed, mpc_active_now, obstacle_data_fresh, obstacle_triggered, emergency_turn_active,
-			   nearest_obstacle_index, nearest_obstacle_distance,
-			   trigger_distance, vehicle_speed, _controller.last_qp_status(), model_pred_pos_error,
-			   model_pred_vel_error, model_pred_att_error, model_pred_age_s, qp_debug.solve_success,
-			   qp_debug.solve_tier_used,
-			   qp_debug.status_polish, qp_debug.objective_value, qp_debug.primal_residual,
-			   qp_debug.dual_residual, qp_debug.active_slack_max, qp_debug.active_slack_sum,
-			   qp_debug.iterations, qp_debug.solve_time_us, qp_debug.nonlinear_min_clearance,
-			   qp_debug.accepted_step_scale, qp_debug.full_step_rejected);
-
-	if (have_lat) {
-		if (mpc_active_now && PX4_ISFINITE(lat_sp.lateral_acceleration)) {
-			const float roll_lim_rad = math::radians(math::max(_param_fw_r_lim.get(), 5.f));
-			_last_published_roll_sp_rad = math::constrain(atanf(lat_sp.lateral_acceleration / CONSTANTS_ONE_G),
-						      -roll_lim_rad, roll_lim_rad);
-			_have_last_published_roll_sp = true;
-		}
-
-		_lat_sp_pub.publish(lat_sp);
-	}
-
-	if (have_lon) {
-		_lon_sp_pub.publish(lon_sp);
-	}
-
+	finalize_run_cycle(now, mpc_allowed, obstacle_data_fresh, telemetry, setpoints);
 	ScheduleDelayed(20000); // 20 ms
 }
 

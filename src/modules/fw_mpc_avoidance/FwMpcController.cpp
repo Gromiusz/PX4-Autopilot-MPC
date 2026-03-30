@@ -81,8 +81,8 @@ bool obstacle_is_ahead(const Vector2f &rel_xy, const Vector2f &vel_xy, float cle
 
 bool FwMpcController::configure(float Ts, int horizon)
 {
-	if (horizon < 1 || horizon > kMaxHorizon) {
-		PX4_ERR("MPC horizon %d exceeds limit %d", horizon, kMaxHorizon);
+	if (horizon < kMinHorizon || horizon > kMaxHorizon) {
+		PX4_ERR("MPC horizon %d outside [%d, %d]", horizon, kMinHorizon, kMaxHorizon);
 		return false;
 	}
 

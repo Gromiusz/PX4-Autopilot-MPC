@@ -18,6 +18,7 @@ class FwMpcController
 public:
 	static constexpr int kStateSize = FixedWingMpcModel::kStateSize;   // 12
 	static constexpr int kControlSize = FixedWingMpcModel::kControlSize; // 4
+	static constexpr int kMinHorizon = 2;
 	static constexpr int kMaxHorizon = 64;
 	static constexpr int kMaxObstacles = 4;
 	// dx (N*n) + du (N*m) + obstacle slacks (N*max_obstacles)
