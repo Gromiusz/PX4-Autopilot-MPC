@@ -170,13 +170,7 @@ FwMpcController::StateVec FwMpcController::initTrim(float V_trim, float z0_up, c
 		_ubar.col(k) = u_trim;
 	}
 
-	_xbar.col(0) = x0;
-
-	for (int k = 0; k < _N; k++) {
-		const StateVec xk = _xbar.col(k);
-		const ControlVec uk = _ubar.col(k);
-		_xbar.col(k + 1) = fd_step(xk, uk);
-	}
+	rolloutStateHorizon(x0, _ubar, _xbar);
 
 	_have_fallback_trajectory = false;
 	_fallback_ubar = _ubar;
@@ -280,10 +274,8 @@ bool FwMpcController::solve_model_steady_reference(float V_target, float z_up, f
 	return converged;
 }
 
-bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
-			   float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next)
+void FwMpcController::update_step_timing(float dt_real_s)
 {
-	(void)is_last; // currently unused
 	const float dt_step_s = math::constrain(dt_real_s, 0.f, 0.5f);
 
 	if (_have_fallback_trajectory) {
@@ -292,80 +284,65 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 	} else {
 		_time_since_last_solve_s = 0.f;
 	}
+}
 
-	matrix::Matrix<float, 3, kMaxHorizon> x_ref_seq{};
-
+void FwMpcController::fill_position_reference_sequence(const matrix::Vector3f &goal_up,
+		matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq) const
+{
 	for (int k = 0; k < _N; k++) {
 		x_ref_seq(0, k) = goal_up(0);
 		x_ref_seq(1, k) = goal_up(1);
 		x_ref_seq(2, k) = goal_up(2);
 	}
+}
 
-	const float guidance_quality = math::constrain(_guidance_quality_factor, 0.05f, 1.f);
-	const float authority_scale = 1.f / math::max(guidance_quality, 0.35f);
-	Weights base_weights = _weights;
-	base_weights.obstacle_proximity_weight *= authority_scale;
-	base_weights.obstacle_proximity_distance *= authority_scale;
-	base_weights.avoidance_tracking_scale_min = math::constrain(base_weights.avoidance_tracking_scale_min * guidance_quality, 0.05f, 1.f);
-	base_weights.avoidance_terminal_scale_min = math::constrain(base_weights.avoidance_terminal_scale_min * guidance_quality, 0.02f, 1.f);
-	base_weights.avoidance_control_scale_min = math::constrain(base_weights.avoidance_control_scale_min * guidance_quality, 0.05f, 1.f);
-	const float effective_obstacle_attention_distance = math::max(obstacle_attention_distance, 0.f) * authority_scale;
-	const matrix::Matrix<float, kControlSize, kMaxHorizon> base_ubar = _ubar;
-	bool solved = false;
-	int solved_tier = -1;
-	float last_attempt_slack_max = 0.f;
+float FwMpcController::nearest_forward_obstacle_distance(const StateVec &x_now, bool include_planning_margin) const
+{
+	if (_n_obstacles <= 0) {
+		return INFINITY;
+	}
 
 	const Vector3f uvw_now{x_now(0), x_now(1), x_now(2)};
 	const matrix::Dcmf R_nb = rotation_matrix(x_now(6), x_now(7), x_now(8));
 	const Vector3f vel_ned = R_nb * uvw_now;
 	const Vector2f vel_xy{vel_ned(0), vel_ned(1)};
 	const Vector3f p_now{x_now(9), x_now(10), x_now(11)};
+	float nearest = INFINITY;
 
-	auto nearest_obstacle_distance = [&](bool include_planning_margin) {
-		if (_n_obstacles <= 0) {
-			return INFINITY;
+	for (int j = 0; j < _n_obstacles; j++) {
+		const Obstacle &obs = _obstacles[j];
+		const float planning_margin = include_planning_margin ? math::max(obs.planning_margin, 0.f) : 0.f;
+		const float radius = obs.R + obs.margin + planning_margin + _robustness_margin;
+		const Vector2f obs_xy{obs.c(0), obs.c(1)};
+		const Vector2f rel_xy = obs_xy - Vector2f{p_now(0), p_now(1)};
+
+		if (!obstacle_is_ahead(rel_xy, vel_xy, radius)) {
+			continue;
 		}
 
-		float nearest = INFINITY;
+		const float horizontal_distance_to_surface = rel_xy.norm() - radius;
+		float obstacle_distance = horizontal_distance_to_surface;
 
-		for (int j = 0; j < _n_obstacles; j++) {
-			const Obstacle &obs = _obstacles[j];
-			const float planning_margin = include_planning_margin ? math::max(obs.planning_margin, 0.f) : 0.f;
-			const float radius = obs.R + obs.margin + planning_margin + _robustness_margin;
-			const Vector2f obs_xy{obs.c(0), obs.c(1)};
-			const Vector2f rel_xy = obs_xy - Vector2f{p_now(0), p_now(1)};
+		if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
+			const float half_height = 0.5f * obs.height + obs.margin + _robustness_margin;
+			const float vertical_distance_to_surface = fabsf(p_now(2) - obs.c(2)) - half_height;
 
-			if (!obstacle_is_ahead(rel_xy, vel_xy, radius)) {
+			if (vertical_distance_to_surface > 0.f) {
 				continue;
 			}
 
-			const float horizontal_distance_to_surface = rel_xy.norm() - radius;
-			float obstacle_distance = horizontal_distance_to_surface;
-
-			if (PX4_ISFINITE(obs.height) && obs.height > 0.f) {
-				const float half_height = 0.5f * obs.height + obs.margin + _robustness_margin;
-				const float vertical_distance_to_surface = fabsf(p_now(2) - obs.c(2)) - half_height;
-
-				if (vertical_distance_to_surface > 0.f) {
-					continue;
-				}
-
-				obstacle_distance = math::max(horizontal_distance_to_surface, vertical_distance_to_surface);
-			}
-
-			nearest = math::min(nearest, obstacle_distance);
+			obstacle_distance = math::max(horizontal_distance_to_surface, vertical_distance_to_surface);
 		}
 
-		return nearest;
-	};
+		nearest = math::min(nearest, obstacle_distance);
+	}
 
-	const float current_soft_distance = nearest_obstacle_distance(true);
-	const float current_hard_distance = nearest_obstacle_distance(false);
-	const bool real_soft_threat = PX4_ISFINITE(current_soft_distance)
-				      && current_soft_distance < math::max(base_weights.obstacle_proximity_distance, 12.f);
-	const bool real_hard_threat = PX4_ISFINITE(current_hard_distance)
-				      && current_hard_distance < math::max(0.5f * base_weights.obstacle_proximity_distance, 6.f);
-	const bool very_close_hard_threat = PX4_ISFINITE(current_hard_distance) && current_hard_distance < 4.f;
+	return nearest;
+}
+
+int FwMpcController::compute_rti_iterations(bool real_soft_threat, bool real_hard_threat,
+		bool very_close_hard_threat) const
+{
 	int nIt = (_options.mode == Mode::LMPC) ? 1 : 2;
 
 	if (real_soft_threat) {
@@ -380,246 +357,364 @@ bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_u
 		nIt = math::max(nIt, 4);
 	}
 
-	for (int tier = 0; tier < 4; tier++) {
-		if (tier >= 2 && !real_soft_threat && last_attempt_slack_max < 0.05f) {
-			break;
+	return nIt;
+}
+
+FwMpcController::StepSolveContext FwMpcController::build_step_solve_context(const StateVec &x_now,
+		float obstacle_attention_distance) const
+{
+	StepSolveContext context{};
+	const float guidance_quality = math::constrain(_guidance_quality_factor, 0.05f, 1.f);
+	const float authority_scale = 1.f / math::max(guidance_quality, 0.35f);
+
+	context.base_weights = _weights;
+	context.base_weights.obstacle_proximity_weight *= authority_scale;
+	context.base_weights.obstacle_proximity_distance *= authority_scale;
+	context.base_weights.avoidance_tracking_scale_min = math::constrain(
+			context.base_weights.avoidance_tracking_scale_min * guidance_quality, 0.05f, 1.f);
+	context.base_weights.avoidance_terminal_scale_min = math::constrain(
+			context.base_weights.avoidance_terminal_scale_min * guidance_quality, 0.02f, 1.f);
+	context.base_weights.avoidance_control_scale_min = math::constrain(
+			context.base_weights.avoidance_control_scale_min * guidance_quality, 0.05f, 1.f);
+	context.effective_obstacle_attention_distance = math::max(obstacle_attention_distance, 0.f) * authority_scale;
+	context.base_ubar = _ubar;
+	context.current_soft_distance = nearest_forward_obstacle_distance(x_now, true);
+	context.current_hard_distance = nearest_forward_obstacle_distance(x_now, false);
+	context.real_soft_threat = PX4_ISFINITE(context.current_soft_distance)
+				   && context.current_soft_distance < math::max(context.base_weights.obstacle_proximity_distance, 12.f);
+	context.real_hard_threat = PX4_ISFINITE(context.current_hard_distance)
+				   && context.current_hard_distance < math::max(0.5f * context.base_weights.obstacle_proximity_distance, 6.f);
+	context.very_close_hard_threat = PX4_ISFINITE(context.current_hard_distance) && context.current_hard_distance < 4.f;
+	context.rti_iterations = compute_rti_iterations(context.real_soft_threat, context.real_hard_threat,
+						context.very_close_hard_threat);
+	return context;
+}
+
+bool FwMpcController::should_attempt_solve_tier(const StepSolveContext &context, int tier,
+		float last_attempt_slack_max) const
+{
+	if (tier >= 2 && !context.real_soft_threat && last_attempt_slack_max < 0.05f) {
+		return false;
+	}
+
+	if (tier >= 3 && !context.very_close_hard_threat && (!context.real_hard_threat || last_attempt_slack_max < 0.20f)) {
+		return false;
+	}
+
+	return true;
+}
+
+void FwMpcController::compute_step_reference_data(const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float V_cruise,
+		StepReferenceData &references) const
+{
+	if (_options.recompute_ff) {
+		ff_refs_from_nominal(_xbar, x_ref_seq, V_cruise, references.theta_ref_seq, references.T_ref_seq);
+
+	} else {
+		for (int k = 0; k < _N; k++) {
+			references.theta_ref_seq(k) = _theta_trim;
+			references.T_ref_seq(k) = _T_trim;
+		}
+	}
+
+	heading_refs(_xbar, x_ref_seq, references.psi_ref_seq);
+}
+
+void FwMpcController::linearize_step_horizon(std::array<StateMat, kMaxHorizon> &Ak,
+		std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk) const
+{
+	for (int k = 0; k < _N; k++) {
+		const StateVec xk = _xbar.col(k);
+		ControlVec uk{};
+
+		for (int i = 0; i < kControlSize; i++) {
+			uk(i) = _ubar(i, k);
 		}
 
-		if (tier >= 3 && !very_close_hard_threat && (!real_hard_threat || last_attempt_slack_max < 0.20f)) {
-			break;
+		lin_fd(xk, uk, Ak[k], Bk[k]);
+	}
+}
+
+void FwMpcController::apply_qp_solution(const matrix::Vector<float, kMaxVars> &z)
+{
+	const int Nz_dx = _N * kStateSize;
+
+	for (int k = 0; k < _N; k++) {
+		ControlVec du{};
+
+		for (int i = 0; i < kControlSize; i++) {
+			du(i) = z(Nz_dx + k * kControlSize + i);
 		}
 
-		_weights = weights_for_solve_tier(base_weights, tier);
-		_ubar = base_ubar;
-		bool tier_solved = false;
+		ControlVec u_new = _ubar.col(k) + du;
 
-		for (int it = 0; it < nIt; it++) {
-			_xbar.col(0) = x_now;
+		for (int i = 0; i < kControlSize; i++) {
+			u_new(i) = math::constrain(u_new(i), _limits.u_min(i), _limits.u_max(i));
+		}
 
-			for (int k = 0; k < _N; k++) {
-				const StateVec xk = _xbar.col(k);
-				const ControlVec uk = _ubar.col(k);
-				_xbar.col(k + 1) = fd_step(xk, uk);
-			}
+		_ubar.col(k) = u_new;
+	}
+}
 
-			matrix::Vector<float, kMaxHorizon> theta_ref_seq{};
-			matrix::Vector<float, kMaxHorizon> T_ref_seq{};
+bool FwMpcController::solve_step_tier(const StateVec &x_now, const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			      float V_cruise, const StepSolveContext &context, int tier)
+{
+	_weights = weights_for_solve_tier(context.base_weights, tier);
+	_ubar = context.base_ubar;
+	bool tier_solved = false;
 
-			if (_options.recompute_ff) {
-				ff_refs_from_nominal(_xbar, x_ref_seq, V_cruise, theta_ref_seq, T_ref_seq);
+	for (int it = 0; it < context.rti_iterations; it++) {
+		rolloutStateHorizon(x_now, _ubar, _xbar);
 
-			} else {
-				for (int k = 0; k < _N; k++) {
-					theta_ref_seq(k) = _theta_trim;
-					T_ref_seq(k) = _T_trim;
-				}
-			}
+		StepReferenceData references{};
+		compute_step_reference_data(x_ref_seq, V_cruise, references);
 
-			matrix::Vector<float, kMaxHorizon> psi_ref_seq{};
-			heading_refs(_xbar, x_ref_seq, psi_ref_seq);
+		std::array<StateMat, kMaxHorizon> Ak{};
+		std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> Bk{};
+		linearize_step_horizon(Ak, Bk);
 
-			std::array<StateMat, kMaxHorizon> Ak{};
-			std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> Bk{};
+		matrix::Vector<float, kMaxVars> z{};
+		int n_vars = 0;
+		int n_constraints = 0;
 
-			for (int k = 0; k < _N; k++) {
-				const StateVec xk = _xbar.col(k);
-				const ControlVec uk = _ubar.col(k);
-				lin_fd(xk, uk, Ak[k], Bk[k]);
-			}
+		if (buildQP(_xbar, _ubar, x_ref_seq, references.theta_ref_seq, references.T_ref_seq, references.psi_ref_seq,
+			    Ak, Bk, _N, context.effective_obstacle_attention_distance, n_vars, n_constraints)) {
+			tier_solved = solveQP(z, n_vars, n_constraints);
 
-			matrix::Vector<float, kMaxVars> z{};
-			int n_vars = 0;
-			int n_constraints = 0;
-
-				if (buildQP(_xbar, _ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, Ak, Bk, _N,
-					    effective_obstacle_attention_distance, n_vars, n_constraints)) {
-				tier_solved = solveQP(z, n_vars, n_constraints);
-
-			} else {
-				_last_qp_debug = {};
-				_last_qp_debug.solve_success = false;
-				_last_qp_debug.solve_tier_used = tier;
-				tier_solved = false;
-			}
-
+		} else {
+			_last_qp_debug = {};
+			_last_qp_debug.solve_success = false;
 			_last_qp_debug.solve_tier_used = tier;
-			const int Nz_dx = _N * kStateSize;
-
-			for (int k = 0; k < _N; k++) {
-				ControlVec du{};
-
-				for (int i = 0; i < kControlSize; i++) {
-					du(i) = z(Nz_dx + k * kControlSize + i);
-				}
-
-				ControlVec u_new = _ubar.col(k) + du;
-
-				for (int i = 0; i < kControlSize; i++) {
-					u_new(i) = math::constrain(u_new(i), _limits.u_min(i), _limits.u_max(i));
-				}
-
-				_ubar.col(k) = u_new;
-			}
+			tier_solved = false;
 		}
 
-		if (tier_solved) {
-			solved = true;
-			solved_tier = tier;
+		_last_qp_debug.solve_tier_used = tier;
+		apply_qp_solution(z);
+	}
+
+	return tier_solved;
+}
+
+FwMpcController::StepSolveResult FwMpcController::solve_step_problem(const StateVec &x_now,
+		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float V_cruise,
+		const StepSolveContext &context)
+{
+	StepSolveResult result{};
+	float last_attempt_slack_max = 0.f;
+
+	for (int tier = 0; tier < 4; tier++) {
+		if (!should_attempt_solve_tier(context, tier, last_attempt_slack_max)) {
 			break;
+		}
+
+		if (solve_step_tier(x_now, x_ref_seq, V_cruise, context, tier)) {
+			result.solved = true;
+			result.solved_tier = tier;
+			return result;
 		}
 
 		last_attempt_slack_max = PX4_ISFINITE(_last_qp_debug.active_slack_max) ? _last_qp_debug.active_slack_max : 0.f;
 	}
 
-	bool use_fallback_trajectory = !solved && _have_fallback_trajectory;
+	return result;
+}
 
-	if (!solved && use_fallback_trajectory) {
-		// Reuse the tail of the last successful plan instead of reusing a failed local update.
-		_ubar = _fallback_ubar;
+bool FwMpcController::accept_solved_trajectory(const StateVec &x_now,
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> &base_ubar,
+		StepSelection &selection)
+{
+	const matrix::Matrix<float, kControlSize, kMaxHorizon> qp_ubar = _ubar;
+	const std::array<float, 4> acceptance_step_scales{1.f, 0.5f, 0.25f, 0.125f};
+	float best_trial_clearance = -INFINITY;
+	float accepted_alpha = NAN;
+	bool accepted = (_n_obstacles <= 0);
+	bool full_step_rejected = false;
 
-	} else if (!solved) {
-		_ubar = base_ubar;
-	}
-
-	_weights = base_weights;
-	if (solved_tier >= 0) {
-		_last_qp_debug.solve_tier_used = solved_tier;
-	}
-
-	matrix::Matrix<float, kStateSize, kMaxHorizon + 1> selected_xbar{};
-	matrix::Matrix<float, kControlSize, kMaxHorizon> solved_ubar{};
-	ControlVec u_selected{};
-
-	if (solved) {
-		const matrix::Matrix<float, kControlSize, kMaxHorizon> qp_ubar = _ubar;
-		const std::array<float, 4> acceptance_step_scales{1.f, 0.5f, 0.25f, 0.125f};
-		float best_trial_clearance = -INFINITY;
-		float accepted_alpha = NAN;
-		bool accepted = (_n_obstacles <= 0);
-		bool full_step_rejected = false;
-
-		if (accepted) {
-			rolloutStateHorizon(x_now, qp_ubar, selected_xbar);
-			best_trial_clearance = INFINITY;
-			accepted_alpha = 1.f;
-
-		} else {
-			for (int alpha_idx = 0; alpha_idx < static_cast<int>(acceptance_step_scales.size()); alpha_idx++) {
-				const float alpha = acceptance_step_scales[alpha_idx];
-				matrix::Matrix<float, kControlSize, kMaxHorizon> trial_ubar{};
-
-				for (int k = 0; k < _N; k++) {
-					ControlVec u_trial{};
-
-					for (int i = 0; i < kControlSize; i++) {
-						const float delta = qp_ubar(i, k) - base_ubar(i, k);
-						u_trial(i) = math::constrain(base_ubar(i, k) + alpha * delta, _limits.u_min(i), _limits.u_max(i));
-					}
-
-					trial_ubar.col(k) = u_trial;
-				}
-
-				matrix::Matrix<float, kStateSize, kMaxHorizon + 1> trial_xbar{};
-				rolloutStateHorizon(x_now, trial_ubar, trial_xbar);
-				const float trial_clearance = nonlinear_min_hard_clearance(trial_xbar, _N);
-				best_trial_clearance = math::max(best_trial_clearance, trial_clearance);
-
-				if (alpha_idx == 0 && PX4_ISFINITE(trial_clearance) && trial_clearance < 0.f) {
-					full_step_rejected = true;
-				}
-
-				if (!PX4_ISFINITE(trial_clearance) || trial_clearance >= -1e-3f) {
-					_ubar = trial_ubar;
-					selected_xbar = trial_xbar;
-					accepted_alpha = alpha;
-					accepted = true;
-					break;
-				}
-			}
-		}
-
-		_last_qp_debug.nonlinear_min_clearance = best_trial_clearance;
-		_last_qp_debug.accepted_step_scale = accepted_alpha;
-		_last_qp_debug.full_step_rejected = full_step_rejected;
-
-		if (accepted) {
-			solved_ubar = _ubar;
-			_last_solved_xbar = selected_xbar;
-			x_next = selected_xbar.col(1);
-			u_selected = _ubar.col(0);
-
-		} else {
-			solved = false;
-			_last_qp_debug.solve_success = false;
-
-			if (_have_fallback_trajectory) {
-				_ubar = _fallback_ubar;
-				const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
-				const int control_idx = math::constrain(static_cast<int>(floorf(fallback_age_s / math::max(_Ts, 1e-3f))),
-							       0, _N - 1);
-				const float lookahead_age_s = math::min(fallback_age_s + _Ts, static_cast<float>(_N) * _Ts);
-
-				for (int i = 0; i < kControlSize; i++) {
-					u_selected(i) = _fallback_ubar(i, control_idx);
-				}
-
-				if (!sampleStateHorizon(_last_solved_xbar, lookahead_age_s, x_next)) {
-					x_next = fd_step(x_now, u_selected);
-				}
-
-			} else {
-				_ubar = base_ubar;
-				rolloutStateHorizon(x_now, _ubar, selected_xbar);
-				x_next = selected_xbar.col(1);
-				u_selected = _ubar.col(0);
-			}
-		}
-
-	} else if (use_fallback_trajectory) {
-		const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
-		const int control_idx = math::constrain(static_cast<int>(floorf(fallback_age_s / math::max(_Ts, 1e-3f))),
-						       0, _N - 1);
-		const float lookahead_age_s = math::min(fallback_age_s + _Ts, static_cast<float>(_N) * _Ts);
-
-		for (int i = 0; i < kControlSize; i++) {
-			u_selected(i) = _fallback_ubar(i, control_idx);
-		}
-
-		if (!sampleStateHorizon(_last_solved_xbar, lookahead_age_s, x_next)) {
-			x_next = fd_step(x_now, u_selected);
-		}
+	if (accepted) {
+		rolloutStateHorizon(x_now, qp_ubar, selection.selected_xbar);
+		best_trial_clearance = INFINITY;
+		accepted_alpha = 1.f;
 
 	} else {
-		rolloutStateHorizon(x_now, _ubar, selected_xbar);
-		x_next = selected_xbar.col(1);
-		u_selected = _ubar.col(0);
+		for (int alpha_idx = 0; alpha_idx < static_cast<int>(acceptance_step_scales.size()); alpha_idx++) {
+			const float alpha = acceptance_step_scales[alpha_idx];
+			matrix::Matrix<float, kControlSize, kMaxHorizon> trial_ubar{};
+
+			for (int k = 0; k < _N; k++) {
+				ControlVec u_trial{};
+
+				for (int i = 0; i < kControlSize; i++) {
+					const float delta = qp_ubar(i, k) - base_ubar(i, k);
+					u_trial(i) = math::constrain(base_ubar(i, k) + alpha * delta, _limits.u_min(i), _limits.u_max(i));
+				}
+
+				trial_ubar.col(k) = u_trial;
+			}
+
+			matrix::Matrix<float, kStateSize, kMaxHorizon + 1> trial_xbar{};
+			rolloutStateHorizon(x_now, trial_ubar, trial_xbar);
+			const float trial_clearance = nonlinear_min_hard_clearance(trial_xbar, _N);
+			best_trial_clearance = math::max(best_trial_clearance, trial_clearance);
+
+			if (alpha_idx == 0 && PX4_ISFINITE(trial_clearance) && trial_clearance < 0.f) {
+				full_step_rejected = true;
+			}
+
+			if (!PX4_ISFINITE(trial_clearance) || trial_clearance >= -1e-3f) {
+				_ubar = trial_ubar;
+				selection.selected_xbar = trial_xbar;
+				accepted_alpha = alpha;
+				accepted = true;
+				break;
+			}
+		}
 	}
 
-	u_apply = u_selected;
+	_last_qp_debug.nonlinear_min_clearance = best_trial_clearance;
+	_last_qp_debug.accepted_step_scale = accepted_alpha;
+	_last_qp_debug.full_step_rejected = full_step_rejected;
 
+	if (!accepted) {
+		return false;
+	}
+
+	selection.solved = true;
+	selection.solved_ubar = _ubar;
+	_last_solved_xbar = selection.selected_xbar;
+	selection.x_next = selection.selected_xbar.col(1);
+
+	for (int i = 0; i < kControlSize; i++) {
+		selection.u_selected(i) = _ubar(i, 0);
+	}
+
+	return true;
+}
+
+void FwMpcController::select_fallback_trajectory(const StateVec &x_now, StepSelection &selection)
+{
+	selection.use_fallback_trajectory = true;
+	_ubar = _fallback_ubar;
+
+	const float fallback_age_s = math::max(_time_since_last_solve_s, 0.f);
+	const int control_idx = math::constrain(static_cast<int>(floorf(fallback_age_s / math::max(_Ts, 1e-3f))), 0, _N - 1);
+	const float lookahead_age_s = math::min(fallback_age_s + _Ts, static_cast<float>(_N) * _Ts);
+
+	for (int i = 0; i < kControlSize; i++) {
+		selection.u_selected(i) = _fallback_ubar(i, control_idx);
+	}
+
+	if (!sampleStateHorizon(_last_solved_xbar, lookahead_age_s, selection.x_next)) {
+		selection.x_next = fd_step(x_now, selection.u_selected);
+	}
+}
+
+void FwMpcController::select_nominal_trajectory(const StateVec &x_now, StepSelection &selection)
+{
+	rolloutStateHorizon(x_now, _ubar, selection.selected_xbar);
+	selection.x_next = selection.selected_xbar.col(1);
+
+	for (int i = 0; i < kControlSize; i++) {
+		selection.u_selected(i) = _ubar(i, 0);
+	}
+}
+
+FwMpcController::StepSelection FwMpcController::select_step_trajectory(const StateVec &x_now,
+		const StepSolveContext &context, const StepSolveResult &solve_result)
+{
+	StepSelection selection{};
+
+	if (solve_result.solved) {
+		if (accept_solved_trajectory(x_now, context.base_ubar, selection)) {
+			return selection;
+		}
+
+		_last_qp_debug.solve_success = false;
+
+		if (_have_fallback_trajectory) {
+			select_fallback_trajectory(x_now, selection);
+
+		} else {
+			_ubar = context.base_ubar;
+			select_nominal_trajectory(x_now, selection);
+		}
+
+		return selection;
+	}
+
+	if (_have_fallback_trajectory) {
+		select_fallback_trajectory(x_now, selection);
+
+	} else {
+		_ubar = context.base_ubar;
+		select_nominal_trajectory(x_now, selection);
+	}
+
+	return selection;
+}
+
+void FwMpcController::constrain_selected_control(ControlVec &u_apply) const
+{
 	for (int i = 0; i < kControlSize; i++) {
 		u_apply(i) = math::constrain(u_apply(i), _limits.u_min(i), _limits.u_max(i));
 	}
+}
 
-	// Shift horizon
-	if (_N > 1) {
-		for (int k = 0; k < _N - 1; k++) {
-			_ubar.col(k) = _ubar.col(k + 1);
-		}
-
-		_ubar.col(_N - 1) = _ubar.col(_N - 2);
+void FwMpcController::shift_control_horizon()
+{
+	if (_N <= 1) {
+		return;
 	}
 
-	rolloutStateHorizon(x_next, _ubar, _xbar);
-
-	if (solved) {
-		_fallback_ubar = solved_ubar;
-		rolloutAppliedStateSequence(x_now, _fallback_ubar, _fallback_xapply);
-		_have_fallback_trajectory = true;
-		_time_since_last_solve_s = 0.f;
+	for (int k = 0; k < _N - 1; k++) {
+		_ubar.col(k) = _ubar.col(k + 1);
 	}
 
-	return solved || use_fallback_trajectory;
+	_ubar.col(_N - 1) = _ubar.col(_N - 2);
+}
+
+void FwMpcController::cache_solved_trajectory(const StateVec &x_now,
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> &solved_ubar)
+{
+	_fallback_ubar = solved_ubar;
+	rolloutAppliedStateSequence(x_now, _fallback_ubar, _fallback_xapply);
+	_have_fallback_trajectory = true;
+	_time_since_last_solve_s = 0.f;
+}
+
+void FwMpcController::finalize_step_state(const StateVec &x_now, const StepSelection &selection)
+{
+	shift_control_horizon();
+	rolloutStateHorizon(selection.x_next, _ubar, _xbar);
+
+	if (selection.solved) {
+		cache_solved_trajectory(x_now, selection.solved_ubar);
+	}
+}
+
+bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
+			   float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next)
+{
+	(void)is_last; // currently unused
+	update_step_timing(dt_real_s);
+
+	matrix::Matrix<float, 3, kMaxHorizon> x_ref_seq{};
+	fill_position_reference_sequence(goal_up, x_ref_seq);
+
+	const StepSolveContext solve_context = build_step_solve_context(x_now, obstacle_attention_distance);
+	const StepSolveResult solve_result = solve_step_problem(x_now, x_ref_seq, V_cruise, solve_context);
+
+	_weights = solve_context.base_weights;
+
+	if (solve_result.solved_tier >= 0) {
+		_last_qp_debug.solve_tier_used = solve_result.solved_tier;
+	}
+
+	StepSelection selection = select_step_trajectory(x_now, solve_context, solve_result);
+	u_apply = selection.u_selected;
+	constrain_selected_control(u_apply);
+	x_next = selection.x_next;
+	finalize_step_state(x_now, selection);
+	return selection.solved || selection.use_fallback_trajectory;
 }
 
 void FwMpcController::rolloutStateHorizon(const StateVec &x0,

@@ -137,11 +137,71 @@ public:
 private:
 	using StateMat = matrix::SquareMatrix<float, kStateSize>;
 
+	struct StepReferenceData {
+		matrix::Vector<float, kMaxHorizon> theta_ref_seq{};
+		matrix::Vector<float, kMaxHorizon> T_ref_seq{};
+		matrix::Vector<float, kMaxHorizon> psi_ref_seq{};
+	};
+
+	struct StepSolveContext {
+		Weights base_weights{};
+		matrix::Matrix<float, kControlSize, kMaxHorizon> base_ubar{};
+		float effective_obstacle_attention_distance{0.f};
+		float current_soft_distance{0.f};
+		float current_hard_distance{0.f};
+		int rti_iterations{1};
+		bool real_soft_threat{false};
+		bool real_hard_threat{false};
+		bool very_close_hard_threat{false};
+	};
+
+	struct StepSolveResult {
+		bool solved{false};
+		int solved_tier{-1};
+	};
+
+	struct StepSelection {
+		bool solved{false};
+		bool use_fallback_trajectory{false};
+		matrix::Matrix<float, kStateSize, kMaxHorizon + 1> selected_xbar{};
+		matrix::Matrix<float, kControlSize, kMaxHorizon> solved_ubar{};
+		ControlVec u_selected{};
+		StateVec x_next{};
+	};
+
 	StateVec fd_step(const StateVec &x0, const ControlVec &u) const;
 	void lin_fd(const StateVec &x, const ControlVec &u, StateMat &A, matrix::Matrix<float, kStateSize, kControlSize> &B) const;
 	bool solve_model_steady_reference(float V_target, float z_up, float phi_ref, float psi_ref, float gamma_ref,
 					  float alpha_seed, float thrust_seed,
 					  float &alpha_ref, float &theta_ref, float &thrust_ref) const;
+	void update_step_timing(float dt_real_s);
+	void fill_position_reference_sequence(const matrix::Vector3f &goal_up,
+					 matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq) const;
+	float nearest_forward_obstacle_distance(const StateVec &x_now, bool include_planning_margin) const;
+	int compute_rti_iterations(bool real_soft_threat, bool real_hard_threat, bool very_close_hard_threat) const;
+	StepSolveContext build_step_solve_context(const StateVec &x_now, float obstacle_attention_distance) const;
+	bool should_attempt_solve_tier(const StepSolveContext &context, int tier, float last_attempt_slack_max) const;
+	void compute_step_reference_data(const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float V_cruise,
+					 StepReferenceData &references) const;
+	void linearize_step_horizon(std::array<StateMat, kMaxHorizon> &Ak,
+				    std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk) const;
+	void apply_qp_solution(const matrix::Vector<float, kMaxVars> &z);
+	bool solve_step_tier(const StateVec &x_now, const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			     float V_cruise, const StepSolveContext &context, int tier);
+	StepSolveResult solve_step_problem(const StateVec &x_now, const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+					   float V_cruise, const StepSolveContext &context);
+	bool accept_solved_trajectory(const StateVec &x_now,
+				      const matrix::Matrix<float, kControlSize, kMaxHorizon> &base_ubar,
+				      StepSelection &selection);
+	void select_fallback_trajectory(const StateVec &x_now, StepSelection &selection);
+	void select_nominal_trajectory(const StateVec &x_now, StepSelection &selection);
+	StepSelection select_step_trajectory(const StateVec &x_now, const StepSolveContext &context,
+					     const StepSolveResult &solve_result);
+	void constrain_selected_control(ControlVec &u_apply) const;
+	void shift_control_horizon();
+	void cache_solved_trajectory(const StateVec &x_now,
+				     const matrix::Matrix<float, kControlSize, kMaxHorizon> &solved_ubar);
+	void finalize_step_state(const StateVec &x_now, const StepSelection &selection);
 	void ff_refs_from_nominal(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 				  const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq, float Vc,
 				  matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
