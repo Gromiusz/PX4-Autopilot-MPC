@@ -28,6 +28,8 @@
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/wind.h>
 
+using namespace time_literals;
+
 /**
  * Fixed-wing MPC avoidance prototype module.
  */
@@ -202,8 +204,9 @@ private:
 	mission_setpoint_position_s _last_mission_setpoint_position_msg{};
 	orb_advert_t _mission_setpoint_position_pub_handles[mission_setpoint_position_s::MAX_CHUNKS]{};
 	uint8_t _mission_setpoint_position_pub_count{0};
-	uint64_t _last_mission_ref_timestamp{0};
 	uint32_t _last_home_update_count{0};
+	uint64_t _last_mission_ref_timestamp{0};
+	uint64_t _obstacle_timeout{500_ms};
 
 	DEFINE_PARAMETERS(
 		(ParamBool<px4::params::FW_MPC_AVOID_EN>) _param_fw_mpc_avoid_en,
@@ -213,7 +216,6 @@ private:
 		(ParamFloat<px4::params::FW_MPC_FAIL_HOLD>) _param_fw_mpc_fail_hold,
 		(ParamFloat<px4::params::FW_MPC_ACT_HYS>) _param_fw_mpc_act_hys,
 		(ParamFloat<px4::params::FW_MPC_DEACT_T>) _param_fw_mpc_deact_t,
-		(ParamFloat<px4::params::FW_MPC_OBS_TO>) _param_fw_mpc_obs_timeout,
 		(ParamFloat<px4::params::FW_MPC_OBS_DMIN>) _param_fw_mpc_obs_dmin,
 		(ParamFloat<px4::params::FW_MPC_OBS_LKHD>) _param_fw_mpc_obs_lkhd,
 		(ParamFloat<px4::params::FW_MPC_OBS_BIAS>) _param_fw_mpc_obs_bias,

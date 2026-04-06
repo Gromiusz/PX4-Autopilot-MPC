@@ -694,7 +694,6 @@ void FwMpcController::finalize_step_state(const StateVec &x_now, const StepSelec
 bool FwMpcController::step(const StateVec &x_now, const matrix::Vector3f &goal_up, float V_cruise, bool is_last,
 			   float obstacle_attention_distance, float dt_real_s, ControlVec &u_apply, StateVec &x_next)
 {
-	(void)is_last; // currently unused
 	update_step_timing(dt_real_s);
 
 	matrix::Matrix<float, 3, kMaxHorizon> x_ref_seq{};
@@ -980,31 +979,29 @@ void FwMpcController::computeActiveObstacles(const matrix::Matrix<float, kStateS
 	}
 }
 
-bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
-				      const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
-				      const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
-				      const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
-				      const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
-				      const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
-				      const std::array<StateMat, kMaxHorizon> &Ak,
-				      const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
-				      int N, float obstacle_attention_distance, int &n_vars, int &n_constraints)
+bool FwMpcController::initializeQpLayout(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+		int N, float obstacle_attention_distance, QpLayout &layout,
+		std::array<bool, kMaxObstacles> &active_obstacles) const
 {
-	const int n = kStateSize;
-	const int m = kControlSize;
-	const int Nz_dx = N * n;
-	const int Nz_du = N * m;
-	const int Nz_slack = N * _n_obstacles;
-	std::array<bool, kMaxObstacles> active_obstacles{};
+	layout = {};
+	layout.N = N;
+	layout.Nz_dx = N * kStateSize;
+	layout.Nz_du = N * kControlSize;
+	layout.Nz_slack = N * _n_obstacles;
 	active_obstacles.fill(false);
 	computeActiveObstacles(xbar, N, obstacle_attention_distance, active_obstacles);
-	n_vars = Nz_dx + Nz_du + Nz_slack;
+	layout.n_vars = layout.Nz_dx + layout.Nz_du + layout.Nz_slack;
 
-	if (n_vars > kMaxVars) {
-		PX4_ERR("QP var buffer overflow (%d > %d)", n_vars, kMaxVars);
+	if (layout.n_vars > kMaxVars) {
+		PX4_ERR("QP var buffer overflow (%d > %d)", layout.n_vars, kMaxVars);
 		return false;
 	}
 
+	return true;
+}
+
+void FwMpcController::resetQpWorkspace()
+{
 	_H.setZero();
 	_f.setZero();
 	_A.setZero();
@@ -1013,89 +1010,192 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 		_l(i) = -OSQP_INFTY;
 		_u(i) = OSQP_INFTY;
 	}
+}
 
-	// Equality constraints for linearized dynamics
+int FwMpcController::addDynamicsConstraints(const std::array<StateMat, kMaxHorizon> &Ak,
+		const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
+		const QpLayout &layout)
+{
 	int row = 0;
 
-	for (int k = 0; k < N; k++) {
-		const int idx_dxk = k * n;
+	for (int k = 0; k < layout.N; k++) {
+		const int idx_dxk = k * kStateSize;
 
-		for (int i = 0; i < n; i++) {
+		for (int i = 0; i < kStateSize; i++) {
 			_A(row + i, idx_dxk + i) = 1.f;
 			_l(row + i) = 0.f;
 			_u(row + i) = 0.f;
 		}
 
 		if (k == 0) {
-			const int idx_du0 = Nz_dx;
+			const int idx_du0 = layout.Nz_dx;
 
-			for (int i = 0; i < n; i++) {
-				for (int j = 0; j < m; j++) {
+			for (int i = 0; i < kStateSize; i++) {
+				for (int j = 0; j < kControlSize; j++) {
 					_A(row + i, idx_du0 + j) = -Bk[0](i, j);
 				}
 			}
 
 		} else {
-			const int idx_dxkm1 = (k - 1) * n;
-			const int idx_dukm1 = Nz_dx + (k - 1) * m;
+			const int idx_dxkm1 = (k - 1) * kStateSize;
+			const int idx_dukm1 = layout.Nz_dx + (k - 1) * kControlSize;
 
-			for (int i = 0; i < n; i++) {
-				for (int j = 0; j < n; j++) {
+			for (int i = 0; i < kStateSize; i++) {
+				for (int j = 0; j < kStateSize; j++) {
 					_A(row + i, idx_dxkm1 + j) = -Ak[k - 1](i, j);
 				}
 
-				for (int j = 0; j < m; j++) {
+				for (int j = 0; j < kControlSize; j++) {
 					_A(row + i, idx_dukm1 + j) = -Bk[k - 1](i, j);
 				}
 			}
 		}
 
-		row += n;
+		row += kStateSize;
 	}
 
-	int row_offset = row;
+	return row;
+}
 
-	// Selectors
-	Matrix<float, 3, n> Spos{};
-	Spos(0, 9) = 1.f;
-	Spos(1, 10) = 1.f;
-	Spos(2, 11) = 1.f;
-	Matrix<float, 3, n> Sang{};
-	Sang(0, 6) = 1.f;
-	Sang(1, 7) = 1.f;
-	Sang(2, 8) = 1.f;
+FwMpcController::QpCostContext FwMpcController::buildQpCostContext() const
+{
+	QpCostContext context{};
+	context.Spos(0, 9) = 1.f;
+	context.Spos(1, 10) = 1.f;
+	context.Spos(2, 11) = 1.f;
+	context.Sang(0, 6) = 1.f;
+	context.Sang(1, 7) = 1.f;
+	context.Sang(2, 8) = 1.f;
+	context.Spos_T = context.Spos.transpose();
+	context.Sang_T = context.Sang.transpose();
+	context.epsI.setZero();
 
-	const Matrix<float, n, 3> Spos_T = Spos.transpose();
-	const Matrix<float, n, 3> Sang_T = Sang.transpose();
-
-	Matrix<float, n, n> epsI{};
-	epsI.setZero();
-
-	for (int i = 0; i < n; i++) {
-		epsI(i, i) = 2.f * 1e-5f;
+	for (int i = 0; i < kStateSize; i++) {
+		context.epsI(i, i) = 2.f * 1e-5f;
 	}
 
-	const Matrix<float, n, n> Qpos = 2.f * (Spos_T * (_weights.Qp * Spos));
-	const Matrix<float, n, n> Qang = 2.f * (Sang_T * (_weights.Qang * Sang));
-	const float obs_distance = math::max(_weights.obstacle_proximity_distance, 0.f);
-	const float tracking_scale_min = math::constrain(_weights.avoidance_tracking_scale_min, 0.05f, 1.f);
-	const float terminal_scale_min = math::constrain(_weights.avoidance_terminal_scale_min, 0.02f, 1.f);
-	const float control_scale_min = math::constrain(_weights.avoidance_control_scale_min, 0.05f, 1.f);
-	std::array<float, kMaxHorizon> stage_avoidance_gain{};
-	stage_avoidance_gain.fill(0.f);
-	float max_horizon_avoidance_gain = 0.f;
+	context.Qpos = 2.f * (context.Spos_T * (_weights.Qp * context.Spos));
+	context.Qang = 2.f * (context.Sang_T * (_weights.Qang * context.Sang));
+	context.obs_distance = math::max(_weights.obstacle_proximity_distance, 0.f);
+	context.tracking_scale_min = math::constrain(_weights.avoidance_tracking_scale_min, 0.05f, 1.f);
+	context.terminal_scale_min = math::constrain(_weights.avoidance_terminal_scale_min, 0.02f, 1.f);
+	context.control_scale_min = math::constrain(_weights.avoidance_control_scale_min, 0.05f, 1.f);
+	context.stage_avoidance_gain.fill(0.f);
+	context.max_horizon_avoidance_gain = 0.f;
+	return context;
+}
 
-	auto stage_obstacle_urgency = [&](const Vector3f &pbar) {
-		if (_n_obstacles <= 0 || obs_distance <= 0.f) {
-			return 0.f;
+float FwMpcController::stageObstacleUrgency(const Vector3f &pbar,
+		const std::array<bool, kMaxObstacles> &active_obstacles,
+		float obs_distance) const
+{
+	if (_n_obstacles <= 0 || obs_distance <= 0.f) {
+		return 0.f;
+	}
+
+	float max_urgency = 0.f;
+
+	for (int j = 0; j < _n_obstacles; j++) {
+		if (!active_obstacles[j]) {
+			continue;
 		}
 
-		float max_urgency = 0.f;
+		if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
+			const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
+			const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
+
+			if (vertical_distance_to_surface > 0.f) {
+				continue;
+			}
+		}
+
+		const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
+		Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
+		float d_xy = dvec_xy.norm();
+
+		if (d_xy < 1e-6f) {
+			d_xy = 1e-6f;
+		}
+
+		const float proximity = (Rbuf + obs_distance) - d_xy;
+
+		if (proximity <= 0.f) {
+			continue;
+		}
+
+		max_urgency = math::max(max_urgency, math::constrain(proximity / math::max(obs_distance, 1e-3f), 0.f, 1.f));
+	}
+
+	return max_urgency;
+}
+
+void FwMpcController::addStageCosts(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+		const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+		const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+		const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+		const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+		const QpLayout &layout,
+		const std::array<bool, kMaxObstacles> &active_obstacles,
+		QpCostContext &cost_context)
+{
+	for (int k = 0; k < layout.N; k++) {
+		const int idx_dxk = k * kStateSize;
+		const int idx_duk = layout.Nz_dx + k * kControlSize;
+		const StateVec xk = xbar.col(k + 1);
+		const Vector3f ref_k{x_ref_seq(0, k), x_ref_seq(1, k), x_ref_seq(2, k)};
+		const Vector3f epos = (cost_context.Spos * xk) - ref_k;
+		const Vector3f eang{xk(6), xk(7) - theta_ref_seq(k), angDiff(xk(8), psi_ref_seq(k))};
+		const Vector3f pbar{xk(9), xk(10), xk(11)};
+		const float obstacle_urgency = stageObstacleUrgency(pbar, active_obstacles, cost_context.obs_distance);
+		const float avoidance_gain = sqrtf(math::constrain(obstacle_urgency, 0.f, 1.f));
+		cost_context.stage_avoidance_gain[k] = avoidance_gain;
+		const float tracking_scale = 1.f - avoidance_gain * (1.f - cost_context.tracking_scale_min);
+		const float control_scale = 1.f - avoidance_gain * (1.f - cost_context.control_scale_min);
+		cost_context.max_horizon_avoidance_gain = math::max(cost_context.max_horizon_avoidance_gain, avoidance_gain);
+
+		const Matrix<float, kStateSize, kStateSize> Hdx = tracking_scale * (cost_context.Qpos + cost_context.Qang) + cost_context.epsI;
+		const matrix::Vector<float, kStateSize> fdx = 2.f * tracking_scale
+					      * (cost_context.Spos_T * (_weights.Qp * epos) + cost_context.Sang_T * (_weights.Qang * eang));
+
+		for (int i = 0; i < kStateSize; i++) {
+			_f(idx_dxk + i) += fdx(i);
+
+			for (int j = 0; j < kStateSize; j++) {
+				_H(idx_dxk + i, idx_dxk + j) += Hdx(i, j);
+			}
+		}
+
+		// Keep a light absolute-control regularization, but do not heavily penalize
+		// the first move itself. Oscillation suppression is handled below with the
+		// second-difference smoothness penalty.
+		const Matrix<float, kControlSize, kControlSize> Hdu = 2.f * control_scale * (0.15f * _weights.Rdu + _weights.Ru_abs);
+
+		for (int i = 0; i < kControlSize; i++) {
+			for (int j = 0; j < kControlSize; j++) {
+				_H(idx_duk + i, idx_duk + j) += Hdu(i, j);
+			}
+		}
+
+		const ControlVec u_ref{0.f, 0.f, 0.f, T_ref_seq(k)};
+		const ControlVec fdu = 2.f * control_scale * (_weights.Ru_abs * (ubar.col(k) - u_ref));
+
+		for (int i = 0; i < kControlSize; i++) {
+			_f(idx_duk + i) += fdu(i);
+		}
+
+		// Soft proximity cost around obstacles to encourage earlier lateral avoidance.
+		const float obs_weight = math::max(_weights.obstacle_proximity_weight, 0.f) * (1.f + 2.f * avoidance_gain);
+
+		if (obs_weight <= 0.f || cost_context.obs_distance <= 0.f || _n_obstacles <= 0) {
+			continue;
+		}
 
 		for (int j = 0; j < _n_obstacles; j++) {
 			if (!active_obstacles[j]) {
 				continue;
 			}
+
 			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
 				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
 				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
@@ -1111,196 +1211,148 @@ bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizo
 
 			if (d_xy < 1e-6f) {
 				d_xy = 1e-6f;
+				dvec_xy = Vector2f{1.f, 0.f};
 			}
 
-			const float proximity = (Rbuf + obs_distance) - d_xy;
+			const float proximity = (Rbuf + cost_context.obs_distance) - d_xy;
 
 			if (proximity <= 0.f) {
 				continue;
 			}
 
-			max_urgency = math::max(max_urgency, math::constrain(proximity / math::max(obs_distance, 1e-3f), 0.f, 1.f));
-		}
+			const Vector2f grad_xy = -(dvec_xy / d_xy);
+			const float two_w = 2.f * obs_weight;
 
-		return max_urgency;
-	};
-
-	// Stage costs
-	for (int k = 0; k < N; k++) {
-		const int idx_dxk = k * n;
-		const int idx_duk = Nz_dx + k * m;
-
-		const StateVec xk = xbar.col(k + 1);
-			const Vector3f ref_k{x_ref_seq(0, k), x_ref_seq(1, k), x_ref_seq(2, k)};
-			const Vector3f epos = (Spos * xk) - ref_k;
-			const Vector3f eang{xk(6), xk(7) - theta_ref_seq(k), angDiff(xk(8), psi_ref_seq(k))};
-			const Vector3f pbar{xk(9), xk(10), xk(11)};
-			const float obstacle_urgency = stage_obstacle_urgency(pbar);
-			const float avoidance_gain = sqrtf(math::constrain(obstacle_urgency, 0.f, 1.f));
-			stage_avoidance_gain[k] = avoidance_gain;
-			const float tracking_scale = 1.f - avoidance_gain * (1.f - tracking_scale_min);
-			const float control_scale = 1.f - avoidance_gain * (1.f - control_scale_min);
-			max_horizon_avoidance_gain = math::max(max_horizon_avoidance_gain, avoidance_gain);
-
-		const Matrix<float, n, n> Hdx = tracking_scale * (Qpos + Qang) + epsI;
-		const matrix::Vector<float, kStateSize> fdx = 2.f * tracking_scale
-						      * (Spos_T * (_weights.Qp * epos) + Sang_T * (_weights.Qang * eang));
-
-		for (int i = 0; i < n; i++) {
-			_f(idx_dxk + i) += fdx(i);
-
-			for (int j = 0; j < n; j++) {
-				_H(idx_dxk + i, idx_dxk + j) += Hdx(i, j);
-			}
-		}
-
-			// Keep a light absolute-control regularization, but do not heavily penalize
-			// the first move itself. Oscillation suppression is handled below with the
-			// second-difference smoothness penalty.
-			const Matrix<float, m, m> Hdu = 2.f * control_scale * (0.15f * _weights.Rdu + _weights.Ru_abs);
-
-		for (int i = 0; i < m; i++) {
-			for (int j = 0; j < m; j++) {
-				_H(idx_duk + i, idx_duk + j) += Hdu(i, j);
-			}
-		}
-
-		const ControlVec u_ref{0.f, 0.f, 0.f, T_ref_seq(k)};
-		const ControlVec fdu = 2.f * control_scale * (_weights.Ru_abs * (ubar.col(k) - u_ref));
-
-		for (int i = 0; i < m; i++) {
-			_f(idx_duk + i) += fdu(i);
-		}
-
-		// Soft proximity cost around obstacles to encourage earlier lateral avoidance.
-			const float obs_weight = math::max(_weights.obstacle_proximity_weight, 0.f) * (1.f + 2.f * avoidance_gain);
-
-		if (obs_weight > 0.f && obs_distance > 0.f && _n_obstacles > 0) {
-			for (int j = 0; j < _n_obstacles; j++) {
-				if (!active_obstacles[j]) {
-					continue;
-				}
-				if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-					const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
-					const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
-
-					if (vertical_distance_to_surface > 0.f) {
-						continue;
-					}
-				}
-
-				const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
-				Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
-				float d_xy = dvec_xy.norm();
-
-				if (d_xy < 1e-6f) {
-					d_xy = 1e-6f;
-					dvec_xy = Vector2f{1.f, 0.f};
-				}
-
-				const float proximity = (Rbuf + obs_distance) - d_xy;
-
-				if (proximity <= 0.f) {
-					continue;
-				}
-
-				const Vector2f grad_xy = -(dvec_xy / d_xy);
-				const float two_w = 2.f * obs_weight;
-
-				_f(idx_dxk + 9) += two_w * proximity * grad_xy(0);
-				_f(idx_dxk + 10) += two_w * proximity * grad_xy(1);
-				_H(idx_dxk + 9, idx_dxk + 9) += two_w * grad_xy(0) * grad_xy(0);
-				_H(idx_dxk + 9, idx_dxk + 10) += two_w * grad_xy(0) * grad_xy(1);
-				_H(idx_dxk + 10, idx_dxk + 9) += two_w * grad_xy(1) * grad_xy(0);
-				_H(idx_dxk + 10, idx_dxk + 10) += two_w * grad_xy(1) * grad_xy(1);
-			}
+			_f(idx_dxk + 9) += two_w * proximity * grad_xy(0);
+			_f(idx_dxk + 10) += two_w * proximity * grad_xy(1);
+			_H(idx_dxk + 9, idx_dxk + 9) += two_w * grad_xy(0) * grad_xy(0);
+			_H(idx_dxk + 9, idx_dxk + 10) += two_w * grad_xy(0) * grad_xy(1);
+			_H(idx_dxk + 10, idx_dxk + 9) += two_w * grad_xy(1) * grad_xy(0);
+			_H(idx_dxk + 10, idx_dxk + 10) += two_w * grad_xy(1) * grad_xy(1);
 		}
 	}
+}
 
-	// Terminal position cost on last dx block
-	{
-			const int idx_dxN = (N - 1) * n;
-			const StateVec xN = xbar.col(N);
-			const Vector3f ref_N{x_ref_seq(0, N - 1), x_ref_seq(1, N - 1), x_ref_seq(2, N - 1)};
-			const Vector3f eN = (Spos * xN) - ref_N;
-			const float terminal_scale = 1.f - max_horizon_avoidance_gain * (1.f - terminal_scale_min);
-			const Matrix<float, n, n> Hterm = 2.f * terminal_scale * _weights.Qterm * (Spos_T * (_weights.Qp * Spos));
-			const matrix::Vector<float, kStateSize> fterm = 2.f * terminal_scale * _weights.Qterm * (Spos_T * (_weights.Qp * eN));
+void FwMpcController::addTerminalCost(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+		const QpLayout &layout, const QpCostContext &cost_context)
+{
+	const int idx_dxN = (layout.N - 1) * kStateSize;
+	const StateVec xN = xbar.col(layout.N);
+	const Vector3f ref_N{x_ref_seq(0, layout.N - 1), x_ref_seq(1, layout.N - 1), x_ref_seq(2, layout.N - 1)};
+	const Vector3f eN = (cost_context.Spos * xN) - ref_N;
+	const float terminal_scale = 1.f - cost_context.max_horizon_avoidance_gain * (1.f - cost_context.terminal_scale_min);
+	const Matrix<float, kStateSize, kStateSize> Hterm =
+		2.f * terminal_scale * _weights.Qterm * (cost_context.Spos_T * (_weights.Qp * cost_context.Spos));
+	const matrix::Vector<float, kStateSize> fterm =
+		2.f * terminal_scale * _weights.Qterm * (cost_context.Spos_T * (_weights.Qp * eN));
 
-		for (int i = 0; i < n; i++) {
-			_f(idx_dxN + i) += fterm(i);
+	for (int i = 0; i < kStateSize; i++) {
+		_f(idx_dxN + i) += fterm(i);
 
-			for (int j = 0; j < n; j++) {
-				_H(idx_dxN + i, idx_dxN + j) += Hterm(i, j);
-			}
+		for (int j = 0; j < kStateSize; j++) {
+			_H(idx_dxN + i, idx_dxN + j) += Hterm(i, j);
 		}
 	}
+}
 
-		// Smoothness along horizon: penalize second differences so monotonic steering
-		// into and out of the turn is allowed, while oscillatory left-right maneuvers
-		// are discouraged.
-		if (_limits.use_stage_smoothness) {
-			for (int k = 0; k < N - 2; k++) {
-				const int idx_du0 = Nz_dx + k * m;
-				const int idx_du1 = Nz_dx + (k + 1) * m;
-				const int idx_du2 = Nz_dx + (k + 2) * m;
-				const float segment_avoidance_gain = math::max(stage_avoidance_gain[k],
-						       math::max(stage_avoidance_gain[k + 1], stage_avoidance_gain[k + 2]));
-				const float smoothness_scale = 1.f - segment_avoidance_gain * (1.f - control_scale_min);
-
-				for (int i = 0; i < m; i++) {
-					const float w = smoothness_scale * _weights.Rrate_diag(i);
-
-				if (w <= 0.f) {
-					continue;
-				}
-
-					const float ddu_bar = ubar(i, k + 2) - 2.f * ubar(i, k + 1) + ubar(i, k);
-					const float two_w = 2.f * w;
-
-					_H(idx_du0 + i, idx_du0 + i) += two_w;
-					_H(idx_du1 + i, idx_du1 + i) += 4.f * two_w;
-					_H(idx_du2 + i, idx_du2 + i) += two_w;
-					_H(idx_du0 + i, idx_du1 + i) -= 2.f * two_w;
-					_H(idx_du1 + i, idx_du0 + i) -= 2.f * two_w;
-					_H(idx_du1 + i, idx_du2 + i) -= 2.f * two_w;
-					_H(idx_du2 + i, idx_du1 + i) -= 2.f * two_w;
-					_H(idx_du0 + i, idx_du2 + i) += two_w;
-					_H(idx_du2 + i, idx_du0 + i) += two_w;
-
-					_f(idx_du0 + i) += two_w * ddu_bar;
-					_f(idx_du1 + i) += -2.f * two_w * ddu_bar;
-					_f(idx_du2 + i) += two_w * ddu_bar;
-				}
-			}
-		}
-
-	// Soft obstacle constraints: per-constraint nonnegative slack with strong linear/quadratic penalty.
-	if (Nz_slack > 0) {
-		const int idx_slack0 = Nz_dx + Nz_du;
-		const float w_lin = math::max(_weights.obstacle_slack_linear, 0.f);
-		const float w_quad = math::max(_weights.obstacle_slack_quadratic, 0.f);
-
-		for (int i = 0; i < Nz_slack; i++) {
-			const int idx = idx_slack0 + i;
-
-			if (w_quad > 0.f) {
-				_H(idx, idx) += 2.f * w_quad;
-			}
-
-			if (w_lin > 0.f) {
-				_f(idx) += w_lin;
-			}
-		}
+void FwMpcController::addSmoothnessCost(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+		const QpLayout &layout, const QpCostContext &cost_context)
+{
+	if (!_limits.use_stage_smoothness) {
+		return;
 	}
 
-	addObstacleConstraints(xbar, active_obstacles, N, row_offset, Nz_dx, Nz_du, Nz_slack);
+	for (int k = 0; k < layout.N - 2; k++) {
+		const int idx_du0 = layout.Nz_dx + k * kControlSize;
+		const int idx_du1 = layout.Nz_dx + (k + 1) * kControlSize;
+		const int idx_du2 = layout.Nz_dx + (k + 2) * kControlSize;
+		const float segment_avoidance_gain = math::max(cost_context.stage_avoidance_gain[k],
+				       math::max(cost_context.stage_avoidance_gain[k + 1], cost_context.stage_avoidance_gain[k + 2]));
+		const float smoothness_scale = 1.f - segment_avoidance_gain * (1.f - cost_context.control_scale_min);
+
+		for (int i = 0; i < kControlSize; i++) {
+			const float w = smoothness_scale * _weights.Rrate_diag(i);
+
+			if (w <= 0.f) {
+				continue;
+			}
+
+			const float ddu_bar = ubar(i, k + 2) - 2.f * ubar(i, k + 1) + ubar(i, k);
+			const float two_w = 2.f * w;
+
+			_H(idx_du0 + i, idx_du0 + i) += two_w;
+			_H(idx_du1 + i, idx_du1 + i) += 4.f * two_w;
+			_H(idx_du2 + i, idx_du2 + i) += two_w;
+			_H(idx_du0 + i, idx_du1 + i) -= 2.f * two_w;
+			_H(idx_du1 + i, idx_du0 + i) -= 2.f * two_w;
+			_H(idx_du1 + i, idx_du2 + i) -= 2.f * two_w;
+			_H(idx_du2 + i, idx_du1 + i) -= 2.f * two_w;
+			_H(idx_du0 + i, idx_du2 + i) += two_w;
+			_H(idx_du2 + i, idx_du0 + i) += two_w;
+
+			_f(idx_du0 + i) += two_w * ddu_bar;
+			_f(idx_du1 + i) += -2.f * two_w * ddu_bar;
+			_f(idx_du2 + i) += two_w * ddu_bar;
+		}
+	}
+}
+
+void FwMpcController::addSlackPenalties(const QpLayout &layout)
+{
+	if (layout.Nz_slack <= 0) {
+		return;
+	}
+
+	const int idx_slack0 = layout.Nz_dx + layout.Nz_du;
+	const float w_lin = math::max(_weights.obstacle_slack_linear, 0.f);
+	const float w_quad = math::max(_weights.obstacle_slack_quadratic, 0.f);
+
+	for (int i = 0; i < layout.Nz_slack; i++) {
+		const int idx = idx_slack0 + i;
+
+		if (w_quad > 0.f) {
+			_H(idx, idx) += 2.f * w_quad;
+		}
+
+		if (w_lin > 0.f) {
+			_f(idx) += w_lin;
+		}
+	}
+}
+
+bool FwMpcController::buildQP(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+				      const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+				      const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+				      const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+				      const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+				      const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+				      const std::array<StateMat, kMaxHorizon> &Ak,
+				      const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
+				      int N, float obstacle_attention_distance, int &n_vars, int &n_constraints)
+{
+	QpLayout layout{};
+	std::array<bool, kMaxObstacles> active_obstacles{};
+
+	if (!initializeQpLayout(xbar, N, obstacle_attention_distance, layout, active_obstacles)) {
+		return false;
+	}
+
+	n_vars = layout.n_vars;
+	resetQpWorkspace();
+	int row_offset = addDynamicsConstraints(Ak, Bk, layout);
+	QpCostContext cost_context = buildQpCostContext();
+	addStageCosts(xbar, ubar, x_ref_seq, theta_ref_seq, T_ref_seq, psi_ref_seq, layout, active_obstacles, cost_context);
+	addTerminalCost(xbar, x_ref_seq, layout, cost_context);
+	addSmoothnessCost(ubar, layout, cost_context);
+	addSlackPenalties(layout);
+	addObstacleConstraints(xbar, active_obstacles, N, row_offset, layout.Nz_dx, layout.Nz_du, layout.Nz_slack);
 
 	if (_limits.use_stage_smoothness && _limits.use_rate_limits) {
-		addRateConstraints(ubar, N, row_offset, Nz_dx, Nz_du);
+		addRateConstraints(ubar, N, row_offset, layout.Nz_dx, layout.Nz_du);
 	}
 
-	addBounds(ubar, N, row_offset, Nz_dx, Nz_du, Nz_slack);
+	addBounds(ubar, N, row_offset, layout.Nz_dx, layout.Nz_du, layout.Nz_slack);
 
 	if (row_offset > kMaxConstraints) {
 		PX4_ERR("QP constraint buffer overflow (%d > %d)", row_offset, kMaxConstraints);

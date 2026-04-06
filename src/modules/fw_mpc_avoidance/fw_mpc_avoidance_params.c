@@ -94,19 +94,6 @@ PARAM_DEFINE_FLOAT(FW_MPC_ACT_HYS, 2.0f);
 PARAM_DEFINE_FLOAT(FW_MPC_DEACT_T, 0.60f);
 
 /**
- * Obstacle message freshness timeout.
- *
- * If no obstacle update arrives within this time, MPC obstacle activation is disabled.
- *
- * @unit s
- * @min 0.05
- * @max 5.0
- * @decimal 2
- * @group FW MPC Avoidance
- */
-PARAM_DEFINE_FLOAT(FW_MPC_OBS_TO, 0.50f);
-
-/**
  * Minimum activation distance to obstacle surface.
  *
  * MPC obstacle avoidance activates when distance to obstacle surface is below trigger distance.

@@ -169,6 +169,30 @@ private:
 		StateVec x_next{};
 	};
 
+	struct QpLayout {
+		int N{0};
+		int Nz_dx{0};
+		int Nz_du{0};
+		int Nz_slack{0};
+		int n_vars{0};
+	};
+
+	struct QpCostContext {
+		matrix::Matrix<float, 3, kStateSize> Spos{};
+		matrix::Matrix<float, 3, kStateSize> Sang{};
+		matrix::Matrix<float, kStateSize, 3> Spos_T{};
+		matrix::Matrix<float, kStateSize, 3> Sang_T{};
+		StateMat epsI{};
+		StateMat Qpos{};
+		StateMat Qang{};
+		float obs_distance{0.f};
+		float tracking_scale_min{1.f};
+		float terminal_scale_min{1.f};
+		float control_scale_min{1.f};
+		std::array<float, kMaxHorizon> stage_avoidance_gain{};
+		float max_horizon_avoidance_gain{0.f};
+	};
+
 	StateVec fd_step(const StateVec &x0, const ControlVec &u) const;
 	void lin_fd(const StateVec &x, const ControlVec &u, StateMat &A, matrix::Matrix<float, kStateSize, kControlSize> &B) const;
 	bool solve_model_steady_reference(float V_target, float z_up, float phi_ref, float psi_ref, float gamma_ref,
@@ -220,6 +244,32 @@ private:
 			     const std::array<StateMat, kMaxHorizon> &Ak,
 			     const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
 			     int N, float obstacle_attention_distance, int &n_vars, int &n_constraints);
+	bool initializeQpLayout(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+			       int N, float obstacle_attention_distance, QpLayout &layout,
+			       std::array<bool, kMaxObstacles> &active_obstacles) const;
+	void resetQpWorkspace();
+	int addDynamicsConstraints(const std::array<StateMat, kMaxHorizon> &Ak,
+				   const std::array<matrix::Matrix<float, kStateSize, kControlSize>, kMaxHorizon> &Bk,
+				   const QpLayout &layout);
+	QpCostContext buildQpCostContext() const;
+	float stageObstacleUrgency(const matrix::Vector3f &pbar,
+				   const std::array<bool, kMaxObstacles> &active_obstacles,
+				   float obs_distance) const;
+	void addStageCosts(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+			   const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+			   const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			   const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+			   const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+			   const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+			   const QpLayout &layout,
+			   const std::array<bool, kMaxObstacles> &active_obstacles,
+			   QpCostContext &cost_context);
+	void addTerminalCost(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+			     const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+			     const QpLayout &layout, const QpCostContext &cost_context);
+	void addSmoothnessCost(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+			       const QpLayout &layout, const QpCostContext &cost_context);
+	void addSlackPenalties(const QpLayout &layout);
 	bool solveQP(matrix::Vector<float, kMaxVars> &z, int n_vars, int n_constraints);
 	Weights weights_for_solve_tier(const Weights &base_weights, int tier) const;
 	void computeActiveObstacles(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar, int N,

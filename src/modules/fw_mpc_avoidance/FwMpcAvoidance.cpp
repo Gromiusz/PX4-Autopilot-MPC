@@ -604,10 +604,7 @@ bool FwMpcAvoidance::should_activate_mpc(const vehicle_local_position_s &lpos, c
 	trigger_distance = NAN;
 	nearest_obstacle_index = -1;
 
-	const hrt_abstime obstacle_timeout_us =
-		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
-
-	if (_obstacle_count <= 0 || hrt_elapsed_time(&_time_obstacle_last_update) > obstacle_timeout_us) {
+	if (_obstacle_count <= 0 || hrt_elapsed_time(&_time_obstacle_last_update) > _obstacle_timeout) {
 		return false;
 	}
 
@@ -720,9 +717,8 @@ bool FwMpcAvoidance::compute_mpc_allowed(bool &obstacle_data_fresh)
 	vehicle_control_mode_s control_mode{};
 	const bool have_status = _status_sub.copy(&status);
 	const bool have_control_mode = _control_mode_sub.copy(&control_mode);
-	const hrt_abstime obstacle_timeout_us =
-		static_cast<hrt_abstime>(math::max(_param_fw_mpc_obs_timeout.get(), 0.05f) * 1e6f);
-	obstacle_data_fresh = (_obstacle_count > 0) && (hrt_elapsed_time(&_time_obstacle_last_update) <= obstacle_timeout_us);
+
+	obstacle_data_fresh = (_obstacle_count > 0) && (hrt_elapsed_time(&_time_obstacle_last_update) <= _obstacle_timeout);
 
 	return have_status && have_control_mode && should_allow_mpc(status, control_mode);
 }
