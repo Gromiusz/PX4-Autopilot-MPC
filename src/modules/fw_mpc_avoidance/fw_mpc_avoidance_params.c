@@ -243,9 +243,7 @@ PARAM_DEFINE_FLOAT(FW_MPC_MIN_ALT, 10.0f);
 /**
  * Legacy MPC model mass.
  *
- * Mass used by the internal full-state MPC model. This is intentionally
- * separate from SIH_* so the avoidance model can be tuned independently of
- * simulator_sih.
+ * Mass used by the internal full-state MPC model.
  *
  * Defaults are aligned with the Gazebo advanced_plane model.
  *

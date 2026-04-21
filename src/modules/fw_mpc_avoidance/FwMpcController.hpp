@@ -170,11 +170,11 @@ private:
 	};
 
 	struct QpLayout {
-		int N{0};
-		int Nz_dx{0};
-		int Nz_du{0};
-		int Nz_slack{0};
-		int n_vars{0};
+		int N{0};		// horizon length
+		int Nz_dx{0};		// number of state variables in the QP (N * n)
+		int Nz_du{0};		// number of control variables in the QP (N * m)
+		int Nz_slack{0};	// number of slack variables in the QP (N * max_obstacles)
+		int n_vars{0};		// total number of variables in the QP (Nz_dx + Nz_du + Nz_slack)
 	};
 
 	struct QpCostContext {
@@ -191,6 +191,21 @@ private:
 		float control_scale_min{1.f};
 		std::array<float, kMaxHorizon> stage_avoidance_gain{};
 		float max_horizon_avoidance_gain{0.f};
+	};
+
+	struct StageCostData {
+		int stage_idx{0};
+		int idx_dxk{0};
+		int idx_duk{0};
+		StateVec xk{};
+		matrix::Vector3f ref_k{};
+		matrix::Vector3f epos{};
+		matrix::Vector3f eang{};
+		matrix::Vector3f pbar{};
+		float obstacle_urgency{0.f};
+		float avoidance_gain{0.f};
+		float tracking_scale{1.f};
+		float control_scale{1.f};
 	};
 
 	StateVec fd_step(const StateVec &x0, const ControlVec &u) const;
@@ -255,6 +270,19 @@ private:
 	float stageObstacleUrgency(const matrix::Vector3f &pbar,
 				   const std::array<bool, kMaxObstacles> &active_obstacles,
 				   float obs_distance) const;
+	StageCostData buildStageCostData(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+					 const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+					 const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+					 const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+					 int stage_idx, const QpLayout &layout,
+					 const std::array<bool, kMaxObstacles> &active_obstacles,
+					 QpCostContext &cost_context) const;
+	void addStageTrackingCost(const StageCostData &stage_data, const QpCostContext &cost_context);
+	void addStageControlCost(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+				 const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+				 const StageCostData &stage_data);
+	void addStageObstacleProximityCost(const std::array<bool, kMaxObstacles> &active_obstacles,
+					   const StageCostData &stage_data, const QpCostContext &cost_context);
 	void addStageCosts(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 			   const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
 			   const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,

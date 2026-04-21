@@ -1060,12 +1060,12 @@ int FwMpcController::addDynamicsConstraints(const std::array<StateMat, kMaxHoriz
 FwMpcController::QpCostContext FwMpcController::buildQpCostContext() const
 {
 	QpCostContext context{};
-	context.Spos(0, 9) = 1.f;
-	context.Spos(1, 10) = 1.f;
-	context.Spos(2, 11) = 1.f;
-	context.Sang(0, 6) = 1.f;
-	context.Sang(1, 7) = 1.f;
-	context.Sang(2, 8) = 1.f;
+	context.Spos(0, 9) = 1.f;   // position x
+	context.Spos(1, 10) = 1.f;  // position y
+	context.Spos(2, 11) = 1.f;  // position z_up
+	context.Sang(0, 6) = 1.f;   // roll angle phi
+	context.Sang(1, 7) = 1.f;   // pitch angle theta
+	context.Sang(2, 8) = 1.f;   // yaw angle psi
 	context.Spos_T = context.Spos.transpose();
 	context.Sang_T = context.Sang.transpose();
 	context.epsI.setZero();
@@ -1129,6 +1129,132 @@ float FwMpcController::stageObstacleUrgency(const Vector3f &pbar,
 	return max_urgency;
 }
 
+FwMpcController::StageCostData FwMpcController::buildStageCostData(
+		const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
+		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
+		const matrix::Vector<float, kMaxHorizon> &theta_ref_seq,
+		const matrix::Vector<float, kMaxHorizon> &psi_ref_seq,
+		int stage_idx, const QpLayout &layout,
+		const std::array<bool, kMaxObstacles> &active_obstacles,
+		QpCostContext &cost_context) const
+{
+	StageCostData stage_data{};
+	stage_data.stage_idx = stage_idx;
+	stage_data.idx_dxk = stage_idx * kStateSize;
+	stage_data.idx_duk = layout.Nz_dx + stage_idx * kControlSize;
+	stage_data.xk = xbar.col(stage_idx + 1);
+	stage_data.ref_k = Vector3f{x_ref_seq(0, stage_idx), x_ref_seq(1, stage_idx), x_ref_seq(2, stage_idx)};
+	stage_data.epos = (cost_context.Spos * stage_data.xk) - stage_data.ref_k;
+	stage_data.eang = Vector3f{
+		stage_data.xk(6),
+		stage_data.xk(7) - theta_ref_seq(stage_idx),
+		angDiff(stage_data.xk(8), psi_ref_seq(stage_idx))
+	};
+	stage_data.pbar = Vector3f{stage_data.xk(9), stage_data.xk(10), stage_data.xk(11)};
+	stage_data.obstacle_urgency = stageObstacleUrgency(stage_data.pbar, active_obstacles, cost_context.obs_distance);
+	stage_data.avoidance_gain = sqrtf(math::constrain(stage_data.obstacle_urgency, 0.f, 1.f));
+	stage_data.tracking_scale = 1.f - stage_data.avoidance_gain * (1.f - cost_context.tracking_scale_min);
+	stage_data.control_scale = 1.f - stage_data.avoidance_gain * (1.f - cost_context.control_scale_min);
+	cost_context.stage_avoidance_gain[stage_idx] = stage_data.avoidance_gain;
+	cost_context.max_horizon_avoidance_gain = math::max(cost_context.max_horizon_avoidance_gain,
+							stage_data.avoidance_gain);
+	return stage_data;
+}
+
+void FwMpcController::addStageTrackingCost(const StageCostData &stage_data,
+		const QpCostContext &cost_context)
+{
+	const Matrix<float, kStateSize, kStateSize> Hdx =
+		stage_data.tracking_scale * (cost_context.Qpos + cost_context.Qang) + cost_context.epsI;
+	const matrix::Vector<float, kStateSize> fdx = 2.f * stage_data.tracking_scale
+				      * (cost_context.Spos_T * (_weights.Qp * stage_data.epos)
+					 + cost_context.Sang_T * (_weights.Qang * stage_data.eang));
+
+	for (int i = 0; i < kStateSize; i++) {
+		_f(stage_data.idx_dxk + i) += fdx(i);
+
+		for (int j = 0; j < kStateSize; j++) {
+			_H(stage_data.idx_dxk + i, stage_data.idx_dxk + j) += Hdx(i, j);
+		}
+	}
+}
+
+void FwMpcController::addStageControlCost(const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
+		const matrix::Vector<float, kMaxHorizon> &T_ref_seq,
+		const StageCostData &stage_data)
+{
+	// Keep a light absolute-control regularization, but do not heavily penalize
+	// the first move itself. Oscillation suppression is handled below with the
+	// second-difference smoothness penalty.
+	const Matrix<float, kControlSize, kControlSize> Hdu =
+		2.f * stage_data.control_scale * (0.15f * _weights.Rdu + _weights.Ru_abs);
+
+	for (int i = 0; i < kControlSize; i++) {
+		for (int j = 0; j < kControlSize; j++) {
+			_H(stage_data.idx_duk + i, stage_data.idx_duk + j) += Hdu(i, j);
+		}
+	}
+
+	const ControlVec u_ref{0.f, 0.f, 0.f, T_ref_seq(stage_data.stage_idx)};
+	const ControlVec fdu = 2.f * stage_data.control_scale
+			       * (_weights.Ru_abs * (ubar.col(stage_data.stage_idx) - u_ref));
+
+	for (int i = 0; i < kControlSize; i++) {
+		_f(stage_data.idx_duk + i) += fdu(i);
+	}
+}
+
+void FwMpcController::addStageObstacleProximityCost(const std::array<bool, kMaxObstacles> &active_obstacles,
+		const StageCostData &stage_data, const QpCostContext &cost_context)
+{
+	// Soft proximity cost around obstacles to encourage earlier lateral avoidance.
+	const float obs_weight = math::max(_weights.obstacle_proximity_weight, 0.f) * (1.f + 2.f * stage_data.avoidance_gain);
+
+	if (obs_weight <= 0.f || cost_context.obs_distance <= 0.f || _n_obstacles <= 0) {
+		return;
+	}
+
+	for (int j = 0; j < _n_obstacles; j++) {
+		if (!active_obstacles[j]) {
+			continue;
+		}
+
+		if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
+			const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
+			const float vertical_distance_to_surface = fabsf(stage_data.pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
+
+			if (vertical_distance_to_surface > 0.f) {
+				continue;
+			}
+		}
+
+		const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
+		Vector2f dvec_xy{stage_data.pbar(0) - _obstacles[j].c(0), stage_data.pbar(1) - _obstacles[j].c(1)};
+		float d_xy = dvec_xy.norm();
+
+		if (d_xy < 1e-6f) {
+			d_xy = 1e-6f;
+			dvec_xy = Vector2f{1.f, 0.f};
+		}
+
+		const float proximity = (Rbuf + cost_context.obs_distance) - d_xy;
+
+		if (proximity <= 0.f) {
+			continue;
+		}
+
+		const Vector2f grad_xy = -(dvec_xy / d_xy);
+		const float two_w = 2.f * obs_weight;
+
+		_f(stage_data.idx_dxk + 9) += two_w * proximity * grad_xy(0);
+		_f(stage_data.idx_dxk + 10) += two_w * proximity * grad_xy(1);
+		_H(stage_data.idx_dxk + 9, stage_data.idx_dxk + 9) += two_w * grad_xy(0) * grad_xy(0);
+		_H(stage_data.idx_dxk + 9, stage_data.idx_dxk + 10) += two_w * grad_xy(0) * grad_xy(1);
+		_H(stage_data.idx_dxk + 10, stage_data.idx_dxk + 9) += two_w * grad_xy(1) * grad_xy(0);
+		_H(stage_data.idx_dxk + 10, stage_data.idx_dxk + 10) += two_w * grad_xy(1) * grad_xy(1);
+	}
+}
+
 void FwMpcController::addStageCosts(const matrix::Matrix<float, kStateSize, kMaxHorizon + 1> &xbar,
 		const matrix::Matrix<float, kControlSize, kMaxHorizon> &ubar,
 		const matrix::Matrix<float, 3, kMaxHorizon> &x_ref_seq,
@@ -1140,96 +1266,11 @@ void FwMpcController::addStageCosts(const matrix::Matrix<float, kStateSize, kMax
 		QpCostContext &cost_context)
 {
 	for (int k = 0; k < layout.N; k++) {
-		const int idx_dxk = k * kStateSize;
-		const int idx_duk = layout.Nz_dx + k * kControlSize;
-		const StateVec xk = xbar.col(k + 1);
-		const Vector3f ref_k{x_ref_seq(0, k), x_ref_seq(1, k), x_ref_seq(2, k)};
-		const Vector3f epos = (cost_context.Spos * xk) - ref_k;
-		const Vector3f eang{xk(6), xk(7) - theta_ref_seq(k), angDiff(xk(8), psi_ref_seq(k))};
-		const Vector3f pbar{xk(9), xk(10), xk(11)};
-		const float obstacle_urgency = stageObstacleUrgency(pbar, active_obstacles, cost_context.obs_distance);
-		const float avoidance_gain = sqrtf(math::constrain(obstacle_urgency, 0.f, 1.f));
-		cost_context.stage_avoidance_gain[k] = avoidance_gain;
-		const float tracking_scale = 1.f - avoidance_gain * (1.f - cost_context.tracking_scale_min);
-		const float control_scale = 1.f - avoidance_gain * (1.f - cost_context.control_scale_min);
-		cost_context.max_horizon_avoidance_gain = math::max(cost_context.max_horizon_avoidance_gain, avoidance_gain);
-
-		const Matrix<float, kStateSize, kStateSize> Hdx = tracking_scale * (cost_context.Qpos + cost_context.Qang) + cost_context.epsI;
-		const matrix::Vector<float, kStateSize> fdx = 2.f * tracking_scale
-					      * (cost_context.Spos_T * (_weights.Qp * epos) + cost_context.Sang_T * (_weights.Qang * eang));
-
-		for (int i = 0; i < kStateSize; i++) {
-			_f(idx_dxk + i) += fdx(i);
-
-			for (int j = 0; j < kStateSize; j++) {
-				_H(idx_dxk + i, idx_dxk + j) += Hdx(i, j);
-			}
-		}
-
-		// Keep a light absolute-control regularization, but do not heavily penalize
-		// the first move itself. Oscillation suppression is handled below with the
-		// second-difference smoothness penalty.
-		const Matrix<float, kControlSize, kControlSize> Hdu = 2.f * control_scale * (0.15f * _weights.Rdu + _weights.Ru_abs);
-
-		for (int i = 0; i < kControlSize; i++) {
-			for (int j = 0; j < kControlSize; j++) {
-				_H(idx_duk + i, idx_duk + j) += Hdu(i, j);
-			}
-		}
-
-		const ControlVec u_ref{0.f, 0.f, 0.f, T_ref_seq(k)};
-		const ControlVec fdu = 2.f * control_scale * (_weights.Ru_abs * (ubar.col(k) - u_ref));
-
-		for (int i = 0; i < kControlSize; i++) {
-			_f(idx_duk + i) += fdu(i);
-		}
-
-		// Soft proximity cost around obstacles to encourage earlier lateral avoidance.
-		const float obs_weight = math::max(_weights.obstacle_proximity_weight, 0.f) * (1.f + 2.f * avoidance_gain);
-
-		if (obs_weight <= 0.f || cost_context.obs_distance <= 0.f || _n_obstacles <= 0) {
-			continue;
-		}
-
-		for (int j = 0; j < _n_obstacles; j++) {
-			if (!active_obstacles[j]) {
-				continue;
-			}
-
-			if (PX4_ISFINITE(_obstacles[j].height) && _obstacles[j].height > 0.f) {
-				const float half_height_buffered = 0.5f * _obstacles[j].height + _obstacles[j].margin + _robustness_margin;
-				const float vertical_distance_to_surface = fabsf(pbar(2) - _obstacles[j].c(2)) - half_height_buffered;
-
-				if (vertical_distance_to_surface > 0.f) {
-					continue;
-				}
-			}
-
-			const float Rbuf = _obstacles[j].R + _obstacles[j].margin + _obstacles[j].planning_margin + _robustness_margin;
-			Vector2f dvec_xy{pbar(0) - _obstacles[j].c(0), pbar(1) - _obstacles[j].c(1)};
-			float d_xy = dvec_xy.norm();
-
-			if (d_xy < 1e-6f) {
-				d_xy = 1e-6f;
-				dvec_xy = Vector2f{1.f, 0.f};
-			}
-
-			const float proximity = (Rbuf + cost_context.obs_distance) - d_xy;
-
-			if (proximity <= 0.f) {
-				continue;
-			}
-
-			const Vector2f grad_xy = -(dvec_xy / d_xy);
-			const float two_w = 2.f * obs_weight;
-
-			_f(idx_dxk + 9) += two_w * proximity * grad_xy(0);
-			_f(idx_dxk + 10) += two_w * proximity * grad_xy(1);
-			_H(idx_dxk + 9, idx_dxk + 9) += two_w * grad_xy(0) * grad_xy(0);
-			_H(idx_dxk + 9, idx_dxk + 10) += two_w * grad_xy(0) * grad_xy(1);
-			_H(idx_dxk + 10, idx_dxk + 9) += two_w * grad_xy(1) * grad_xy(0);
-			_H(idx_dxk + 10, idx_dxk + 10) += two_w * grad_xy(1) * grad_xy(1);
-		}
+		const StageCostData stage_data = buildStageCostData(xbar, x_ref_seq, theta_ref_seq, psi_ref_seq,
+							k, layout, active_obstacles, cost_context);
+		addStageTrackingCost(stage_data, cost_context);
+		addStageControlCost(ubar, T_ref_seq, stage_data);
+		addStageObstacleProximityCost(active_obstacles, stage_data, cost_context);
 	}
 }
 
